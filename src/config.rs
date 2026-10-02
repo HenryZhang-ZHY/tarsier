@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::breaks::BreakSettings;
+use crate::display::InputProtocolPref;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,6 +95,9 @@ pub struct MonitorPrefs {
     pub input_names: BTreeMap<u8, String>,
     /// Extra input codes for monitors that under-report their capabilities.
     pub extra_inputs: Vec<u8>,
+    /// Forces how inputs are switched; detected from the monitor when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_protocol: Option<InputProtocolPref>,
 }
 
 pub fn data_dir() -> PathBuf {
@@ -148,6 +152,7 @@ mod tests {
         let prefs = cfg.monitors.entry("m".into()).or_default();
         prefs.toggle = Some([0x0F, 0x11]);
         prefs.input_names.insert(0x11, "笔记本".into());
+        prefs.input_protocol = serde_json::from_str(r#"{"kind":"lg","values":{"16":210}}"#).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), cfg);
     }

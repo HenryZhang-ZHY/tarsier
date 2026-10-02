@@ -50,7 +50,6 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    #[cfg(test)]
     pub fn supports(&self, code: u8) -> bool {
         self.vcp.contains_key(&code)
     }

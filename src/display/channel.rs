@@ -3,6 +3,8 @@
 
 use anyhow::Result;
 
+use super::ddcci::Packet;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Feature {
     pub current: u32,
@@ -16,4 +18,12 @@ pub trait VcpChannel: Send + Sync {
     fn set(&self, code: u8, value: u32) -> Result<()>;
     /// The raw MCCS capabilities string.
     fn capabilities(&self) -> Result<String>;
+}
+
+/// Arbitrary DDC/CI writes on the display's I²C bus. Needed for vendor side
+/// channels that OS APIs cannot reach, e.g. a non-standard host address.
+pub trait RawDdcChannel: Send + Sync {
+    /// Short backend name for logs, e.g. `nvapi`.
+    fn name(&self) -> &'static str;
+    fn write(&self, packet: &Packet) -> Result<()>;
 }

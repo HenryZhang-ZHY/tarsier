@@ -1,7 +1,7 @@
 //! Application state shared by the tray, hotkeys and windows. Lives as a
 //! GPUI entity for the whole process; windows come and go around it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -123,8 +123,14 @@ impl Controller {
         }
         self.scanning = true;
         cx.notify();
+        let prefs: BTreeMap<_, _> = self
+            .config
+            .monitors
+            .iter()
+            .filter_map(|(id, p)| Some((id.clone(), p.input_protocol.clone()?)))
+            .collect();
         let scan = cx.background_executor().spawn(async move {
-            let monitors = display::enumerate().unwrap_or_default();
+            let monitors = display::enumerate(&prefs).unwrap_or_default();
             monitors
                 .into_iter()
                 .map(|dev| {
