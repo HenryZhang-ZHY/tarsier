@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::core::{s, w};
 
-use super::channel::{RawDdcChannel, RawDdcProvider};
+use super::channel::{DisplayTarget, RawDdcChannel, RawDdcProvider};
 use super::ddcci::Packet;
 
 type Handle = *mut c_void;
@@ -144,9 +144,10 @@ impl RawDdcProvider for NvApi {
         "nvapi"
     }
 
-    fn open(&self, gdi_name: &str) -> Result<Box<dyn RawDdcChannel>> {
+    fn open(&self, target: &DisplayTarget) -> Result<Box<dyn RawDdcChannel>> {
         let api = api()?;
-        let name = CString::new(gdi_name)?;
+        let gdi_name = &target.gdi_name;
+        let name = CString::new(gdi_name.as_str())?;
         let mut display: Handle = null_mut();
         let mut gpus: [Handle; MAX_PHYSICAL_GPUS] = [null_mut(); MAX_PHYSICAL_GPUS];
         let mut gpu_count = 0u32;

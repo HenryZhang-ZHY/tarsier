@@ -146,7 +146,7 @@ fn build(
     let mut raw_backends = Vec::new();
     let mut raw: Option<Box<dyn RawDdcChannel>> = None;
     for provider in providers {
-        match provider.open(&found.gdi_name) {
+        match provider.open(&found.target) {
             Ok(channel) => {
                 raw_backends.push((provider.name(), Ok(())));
                 raw = Some(Box::new(TracedRaw {
@@ -174,7 +174,7 @@ fn build(
     let selected = input::select(identity.as_ref(), caps.as_ref(), prefs.get(&found.id));
 
     let diagnostics = Diagnostics {
-        gdi_name: found.gdi_name,
+        target: found.target,
         adapter: found.adapter,
         identity,
         capabilities,

@@ -30,10 +30,20 @@ pub trait RawDdcChannel: Send + Sync {
     fn write(&self, packet: &Packet) -> Result<()>;
 }
 
+/// Where a display hangs off the GPU, in the terms GPU SDKs use to find it.
+#[derive(Debug, Clone, Default)]
+pub struct DisplayTarget {
+    /// GDI source name, e.g. `\\.\DISPLAY1`.
+    pub gdi_name: String,
+    /// `QueryDisplayConfig` adapter LUID (high part << 32 | low part).
+    pub adapter_luid: Option<u64>,
+    /// `QueryDisplayConfig` target id, unique per adapter.
+    pub target_id: Option<u32>,
+}
+
 /// Opens raw channels for the displays a backend (usually a GPU driver) drives.
 pub trait RawDdcProvider {
     fn name(&self) -> &'static str;
-    /// `gdi_name` is the Windows display source, e.g. `\\.\DISPLAY1`. The
-    /// error says why this backend cannot reach the display.
-    fn open(&self, gdi_name: &str) -> Result<Box<dyn RawDdcChannel>>;
+    /// The error says why this backend cannot reach the display.
+    fn open(&self, target: &DisplayTarget) -> Result<Box<dyn RawDdcChannel>>;
 }

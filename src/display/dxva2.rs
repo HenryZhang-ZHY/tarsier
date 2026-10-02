@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::core::BOOL;
 
-use super::channel::{Feature, VcpChannel};
+use super::channel::{DisplayTarget, Feature, VcpChannel};
 
 /// A physical monitor handle from `dxva2`.
 pub struct Dxva2Channel(HANDLE);
@@ -69,8 +69,7 @@ impl VcpChannel for Dxva2Channel {
 /// A physical monitor found by enumeration, before any DDC/CI traffic.
 pub struct Found {
     pub channel: Dxva2Channel,
-    /// GDI source name, e.g. `\\.\DISPLAY1`.
-    pub gdi_name: String,
+    pub target: DisplayTarget,
     /// Monitor device path (stable across reboots), or a positional fallback.
     pub id: String,
     /// The display adapter (GPU) driving this output.
@@ -120,7 +119,11 @@ pub fn enumerate() -> Result<Vec<Found>> {
                     .unwrap_or_else(|| format!("{gdi_name}#{i}")),
                 friendly_name: display.map(|d| d.friendly.clone()).filter(|n| !n.is_empty()),
                 adapter: adapters.get(&gdi_name).cloned(),
-                gdi_name: gdi_name.clone(),
+                target: DisplayTarget {
+                    gdi_name: gdi_name.clone(),
+                    adapter_luid: display.map(|d| d.adapter_luid),
+                    target_id: display.map(|d| d.target_id),
+                },
                 description,
             });
         }
@@ -155,6 +158,8 @@ fn gdi_device_name(hmon: HMONITOR) -> Option<String> {
 struct DisplayName {
     friendly: String,
     device_path: String,
+    adapter_luid: u64,
+    target_id: u32,
 }
 
 /// Maps GDI device names (`\\.\DISPLAY1`) to the EDID friendly name and device path.
@@ -204,11 +209,17 @@ fn display_names() -> HashMap<String, DisplayName> {
                 DisplayName {
                     friendly: wide_to_string(&target.monitorFriendlyDeviceName),
                     device_path: wide_to_string(&target.monitorDevicePath),
+                    adapter_luid: luid(path.targetInfo.adapterId),
+                    target_id: path.targetInfo.id,
                 },
             );
         }
     }
     map
+}
+
+fn luid(id: windows::Win32::Foundation::LUID) -> u64 {
+    ((id.HighPart as u32 as u64) << 32) | id.LowPart as u64
 }
 
 fn wide_to_string(wide: &[u16]) -> String {
