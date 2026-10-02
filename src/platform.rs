@@ -1,0 +1,138 @@
+//! Small Windows helpers: idle time, "do not disturb" detection, autostart and
+//! single-instance handling.
+
+use std::sync::mpsc::Sender;
+
+use anyhow::Result;
+use windows::Win32::Foundation::{
+    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_OBJECT_0,
+};
+use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows::Win32::UI::Shell::{
+    QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+};
+use windows::core::w;
+
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "tarsier";
+pub const BACKGROUND_ARG: &str = "--background";
+
+/// Seconds since the last keyboard or mouse input in this session.
+pub fn idle_secs() -> u64 {
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe {
+        if !GetLastInputInfo(&mut info).as_bool() {
+            return 0;
+        }
+        // dwTime is a 32-bit tick count; compare in the same width.
+        let now = GetTickCount64() as u32;
+        (now.wrapping_sub(info.dwTime) / 1000) as u64
+    }
+}
+
+/// True while a fullscreen game/video or presentation is running, when a
+/// break overlay would be intrusive.
+pub fn user_is_busy() -> bool {
+    unsafe {
+        SHQueryUserNotificationState()
+            .map(|s| matches!(s, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE))
+            .unwrap_or(false)
+    }
+}
+
+/// Turns a window into a Fadetop-style overlay: mouse clicks fall through to
+/// the windows underneath, it never takes focus, and it stays on top.
+pub fn make_click_through(hwnd: isize) {
+    let hwnd = HWND(hwnd as _);
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let extra = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | extra.0 as isize);
+        // A layered window stays invisible until its attributes are set once.
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+pub fn autostart_enabled() -> bool {
+    windows_registry::CURRENT_USER
+        .open(RUN_KEY)
+        .and_then(|k| k.get_string(RUN_VALUE))
+        .is_ok()
+}
+
+pub fn set_autostart(enabled: bool) -> Result<()> {
+    let key = windows_registry::CURRENT_USER.create(RUN_KEY)?;
+    if enabled {
+        let exe = std::env::current_exe()?;
+        key.set_string(RUN_VALUE, format!("\"{}\" {BACKGROUND_ARG}", exe.display()))?;
+    } else if key.get_string(RUN_VALUE).is_ok() {
+        key.remove_value(RUN_VALUE)?;
+    }
+    Ok(())
+}
+
+/// Held for the process lifetime; a second launch asks this one to show its window.
+pub struct SingleInstance {
+    _mutex: HANDLE,
+}
+
+pub enum Instance {
+    Primary(SingleInstance),
+    /// Another instance is running and has been asked to show itself.
+    Secondary,
+}
+
+/// Claims the single-instance mutex. When primary, `on_activate` receives a
+/// message every time a later launch wants the window shown.
+pub fn claim_single_instance(on_activate: Sender<()>) -> Instance {
+    unsafe {
+        let mutex = CreateMutexW(None, true, w!("Local\\TarsierSingleInstance"));
+        let already = GetLastError() == ERROR_ALREADY_EXISTS;
+        let Ok(mutex) = mutex else {
+            return Instance::Primary(SingleInstance {
+                _mutex: HANDLE::default(),
+            });
+        };
+        if already {
+            if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, w!("Local\\TarsierActivate")) {
+                let _ = SetEvent(event);
+                let _ = CloseHandle(event);
+            }
+            let _ = CloseHandle(mutex);
+            return Instance::Secondary;
+        }
+        if let Ok(event) = CreateEventW(None, false, false, w!("Local\\TarsierActivate")) {
+            let event = event.0 as usize;
+            std::thread::spawn(move || {
+                let event = HANDLE(event as _);
+                while WaitForSingleObject(event, INFINITE) == WAIT_OBJECT_0 {
+                    if on_activate.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Instance::Primary(SingleInstance { _mutex: mutex })
+    }
+}
