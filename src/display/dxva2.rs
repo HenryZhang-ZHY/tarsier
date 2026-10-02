@@ -62,6 +62,8 @@ impl VcpChannel for Dxva2Channel {
 /// A physical monitor found by enumeration, before any DDC/CI traffic.
 pub struct Found {
     pub channel: Dxva2Channel,
+    /// GDI source name, e.g. `\\.\DISPLAY1`.
+    pub gdi_name: String,
     /// Monitor device path (stable across reboots), or a positional fallback.
     pub id: String,
     /// EDID friendly name, if Windows knows one.
@@ -107,6 +109,7 @@ pub fn enumerate() -> Result<Vec<Found>> {
                     .filter(|p| !p.is_empty())
                     .unwrap_or_else(|| format!("{gdi_name}#{i}")),
                 friendly_name: display.map(|d| d.friendly.clone()).filter(|n| !n.is_empty()),
+                gdi_name: gdi_name.clone(),
                 description,
             });
         }

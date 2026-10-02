@@ -3,7 +3,7 @@
 //!
 //! - [`mccs`]: protocol vocabulary and capabilities parsing (pure).
 //! - [`channel`]: transports, i.e. how bytes reach a monitor. One impl per OS
-//!   API or GPU SDK ([`dxva2`]).
+//!   API or GPU SDK: [`dxva2`] for standard VCP, [`nvapi`] for raw I²C.
 //! - [`ddcci`]: packet encoding for raw I²C transports (pure).
 //! - [`input`]: how a monitor wants its input switched, picked per vendor.
 //! - [`Monitor`]: the facade everything else uses. It owns bus timing and
@@ -15,6 +15,7 @@ mod dxva2;
 mod identity;
 mod input;
 pub mod mccs;
+mod nvapi;
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -24,7 +25,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 pub use self::channel::Feature;
-use self::channel::{RawDdcChannel, VcpChannel};
+use self::channel::{RawDdcChannel, RawDdcProvider, VcpChannel};
 use self::identity::Identity;
 pub use self::input::InputProtocolPref;
 use self::input::{Channels, InputProtocol};
@@ -101,16 +102,23 @@ fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
 /// Enumerate all monitors that expose a DDC/CI channel. `prefs` forces an
 /// input protocol for some monitors, keyed by monitor id.
 pub fn enumerate(prefs: &BTreeMap<String, InputProtocolPref>) -> Result<Vec<Monitor>> {
+    let providers = raw_providers();
     Ok(dxva2::enumerate()?
         .into_iter()
         .map(|found| {
+            let raw = providers.iter().find_map(|p| p.open(&found.gdi_name));
             let pref = prefs.get(&found.id);
-            build(found, pref)
+            build(found, raw, pref)
         })
         .collect())
 }
 
-fn build(found: dxva2::Found, pref: Option<&InputProtocolPref>) -> Monitor {
+/// Raw I²C backends, tried in order. AMD (ADL) or Intel (IGCL) go here.
+fn raw_providers() -> Vec<Box<dyn RawDdcProvider>> {
+    vec![Box::new(nvapi::NvApi)]
+}
+
+fn build(found: dxva2::Found, raw: Option<Box<dyn RawDdcChannel>>, pref: Option<&InputProtocolPref>) -> Monitor {
     let caps = retry(|| {
         let raw = found.channel.capabilities();
         thread::sleep(COMMAND_GAP);
@@ -124,7 +132,6 @@ fn build(found: dxva2::Found, pref: Option<&InputProtocolPref>) -> Monitor {
         .unwrap_or(found.description);
     let identity = Identity::from_device_path(&found.id);
     let input = input::select(identity.as_ref(), caps.as_ref(), pref);
-    let raw: Option<Box<dyn RawDdcChannel>> = None;
     log::info!(
         "{name}: {identity:?}, input protocol {}, raw channel {}",
         input.name(),
@@ -138,5 +145,25 @@ fn build(found: dxva2::Found, pref: Option<&InputProtocolPref>) -> Monitor {
         vcp: Box::new(found.channel),
         raw,
         input,
+    }
+}
+
+#[cfg(test)]
+mod hardware {
+    use super::*;
+
+    #[test]
+    #[ignore = "talks to real monitors"]
+    fn probe() {
+        for m in enumerate(&BTreeMap::new()).unwrap() {
+            println!(
+                "PROBE {} | {} | protocol {} | raw {} | current {:?}",
+                m.id,
+                m.name,
+                m.input.name(),
+                m.raw.as_ref().map_or("none", |r| r.name()),
+                m.current_input()
+            );
+        }
     }
 }

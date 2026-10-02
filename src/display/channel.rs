@@ -27,3 +27,9 @@ pub trait RawDdcChannel: Send + Sync {
     fn name(&self) -> &'static str;
     fn write(&self, packet: &Packet) -> Result<()>;
 }
+
+/// Opens raw channels for the displays a backend (usually a GPU driver) drives.
+pub trait RawDdcProvider {
+    /// `gdi_name` is the Windows display source, e.g. `\.\DISPLAY1`.
+    fn open(&self, gdi_name: &str) -> Option<Box<dyn RawDdcChannel>>;
+}
