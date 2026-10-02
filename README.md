@@ -56,10 +56,12 @@ cargo build --release
 | 显卡 | 原始 I²C 后端 |
 | --- | --- |
 | NVIDIA | NVAPI（`nvapi64.dll`） |
-| Intel | IGCL（驱动自带的 `ControlLib.dll`）。DisplayPort / USB-C 走 I²C-over-AUX，HDMI 走 DDC 引脚。Intel 驱动要求写操作有管理员权限 |
+| Intel | IGCL（驱动自带的 `ControlLib.dll`）。DisplayPort / USB-C 走 I²C-over-AUX，HDMI 走 DDC 引脚 |
 | AMD | 暂不支持 |
 
 注意是看**驱动这台显示器的那块显卡**，混合显卡笔记本上外接口常常接在核显上。
+
+Intel 驱动只允许管理员权限的进程写 I²C。tarsier 本身不以管理员身份运行，需要时会临时用管理员身份启动一个只发这一条命令的 tarsier 子进程（`--raw-ddc-write`），所以每次通过 Intel 私有通道切换输入都会弹一次 UAC。
 
 ## 开发者模式
 
@@ -74,7 +76,7 @@ cargo build --release
 ## 已知限制
 
 - 只支持外接显示器的 DDC/CI。笔记本内置屏和部分 USB 扩展坞后面的显示器无法调节。
-- 需要厂商私有通道的显示器，接在 AMD 显卡上时还不能切换输入；接在 Intel 核显上时需要管理员权限。
+- 需要厂商私有通道的显示器，接在 AMD 显卡上时还不能切换输入；接在 Intel 核显上时每次切换都要确认 UAC。
 - 不少显示器需要先在 OSD 菜单里打开 DDC/CI。
 
 ## 许可

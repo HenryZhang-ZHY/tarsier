@@ -1,6 +1,8 @@
 //! Transports: how DDC/CI messages reach a monitor. Each OS API or GPU vendor
 //! SDK is one implementation; the rest of the app never names them.
 
+use std::fmt;
+
 use anyhow::Result;
 
 use super::ddcci::Packet;
@@ -31,7 +33,7 @@ pub trait RawDdcChannel: Send + Sync {
 }
 
 /// Where a display hangs off the GPU, in the terms GPU SDKs use to find it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisplayTarget {
     /// GDI source name, e.g. `\\.\DISPLAY1`.
     pub gdi_name: String,
@@ -47,3 +49,29 @@ pub trait RawDdcProvider {
     /// The error says why this backend cannot reach the display.
     fn open(&self, target: &DisplayTarget) -> Result<Box<dyn RawDdcChannel>>;
 }
+
+/// Returned by a backend whose driver accepts the call only from an elevated
+/// process, so callers can retry it elevated.
+#[derive(Debug)]
+pub struct NeedsElevation(pub String);
+
+impl fmt::Display for NeedsElevation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} (needs administrator rights)", self.0)
+    }
+}
+
+impl std::error::Error for NeedsElevation {}
+
+/// An error that retrying cannot fix, e.g. a cancelled UAC prompt; retrying
+/// it would only ask the user again.
+#[derive(Debug)]
+pub struct NoRetry(pub String);
+
+impl fmt::Display for NoRetry {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoRetry {}

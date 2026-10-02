@@ -545,13 +545,14 @@ impl Controller {
     /// Everything needed to debug monitor control on this machine, as text.
     pub fn diagnostics_report(&self) -> String {
         let mut out = format!(
-            "# tarsier v{} diagnostics ({} {}, {})
+            "# tarsier v{} diagnostics ({} {}, {}, elevated: {})
 
 ",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
-            Local::now().format("%Y-%m-%d %H:%M:%S")
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            display::elevate::process_elevated()
         );
         for m in &self.monitors {
             out.push_str(&m.dev.report());

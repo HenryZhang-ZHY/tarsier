@@ -17,6 +17,7 @@ mod ddcci;
 pub mod diagnostics;
 mod dxva2;
 mod dylib;
+pub mod elevate;
 mod identity;
 mod igcl;
 mod input;
@@ -29,10 +30,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 pub use self::channel::Feature;
-use self::channel::{RawDdcChannel, RawDdcProvider, VcpChannel};
+use self::channel::{NoRetry, RawDdcChannel, RawDdcProvider, VcpChannel};
 use self::diagnostics::Diagnostics;
 use self::identity::Identity;
 pub use self::input::InputProtocolPref;
@@ -114,10 +115,42 @@ fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     for _ in 0..RETRIES {
         match f() {
             Ok(v) => return Ok(v),
+            Err(e) if e.is::<NoRetry>() => return Err(e),
             Err(e) => last = Some(e),
         }
     }
     Err(last.unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use anyhow::{anyhow, bail};
+
+    use super::*;
+
+    #[test]
+    fn retries_transient_errors() {
+        let calls = Cell::new(0);
+        let result = retry(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 { bail!("flaky") } else { Ok(()) }
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn does_not_retry_permanent_errors() {
+        let calls = Cell::new(0);
+        let result: Result<()> = retry(|| {
+            calls.set(calls.get() + 1);
+            Err(anyhow!(NoRetry("UAC cancelled".into())))
+        });
+        assert_eq!(result.unwrap_err().to_string(), "UAC cancelled");
+        assert_eq!(calls.get(), 1, "a second UAC prompt would be wrong");
+    }
 }
 
 /// Enumerate all monitors that expose a DDC/CI channel. `prefs` forces an
@@ -134,6 +167,24 @@ pub fn enumerate(prefs: &BTreeMap<String, InputProtocolPref>) -> Result<Vec<Moni
 /// vendor's GPU. AMD (ADL) would go here.
 fn raw_providers() -> Vec<Box<dyn RawDdcProvider>> {
     vec![Box::new(nvapi::NvApi), Box::new(igcl::Igcl)]
+}
+
+/// Entry point of the elevated helper process (`tarsier.exe --raw-ddc-write`):
+/// reopens the display through the named backend and sends the packet.
+pub fn run_helper(args: &[String]) -> i32 {
+    elevate::helper_main(args, |request| {
+        let providers = raw_providers();
+        let provider = providers
+            .iter()
+            .find(|p| p.name() == request.provider)
+            .with_context(|| format!("unknown backend {}", request.provider))?;
+        let channel = provider.open(&request.target)?;
+        retry(|| {
+            let result = channel.write(&request.packet);
+            thread::sleep(COMMAND_GAP);
+            result
+        })
+    })
 }
 
 fn build(
@@ -153,8 +204,15 @@ fn build(
         match provider.open(&found.target) {
             Ok(channel) => {
                 raw_backends.push((provider.name(), Ok(())));
-                raw = Some(Box::new(TracedRaw {
+                let channel = elevate::Elevating {
                     inner: channel,
+                    provider: provider.name(),
+                    target: found.target.clone(),
+                    elevated: elevate::process_elevated(),
+                    run: elevate::run_elevated,
+                };
+                raw = Some(Box::new(TracedRaw {
+                    inner: Box::new(channel),
                     trace: trace.clone(),
                 }));
                 break;

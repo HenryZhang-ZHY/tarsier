@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow, bail};
 use windows::core::s;
 
-use super::channel::{DisplayTarget, RawDdcChannel, RawDdcProvider};
+use super::channel::{DisplayTarget, NeedsElevation, RawDdcChannel, RawDdcProvider};
 use super::ddcci::Packet;
 use super::dylib;
 
@@ -17,6 +17,7 @@ type Handle = *mut c_void;
 type Status = u32;
 
 const RESULT_SUCCESS: Status = 0;
+const RESULT_ERROR_INSUFFICIENT_PERMISSIONS: Status = 0x4000_0006;
 const RESULT_ERROR_UNSUPPORTED_VERSION: Status = 0x4000_0009;
 const OPERATION_TYPE_WRITE: u32 = 2;
 const DISPLAY_CONFIG_FLAG_DISPLAY_ATTACHED: u32 = 1 << 1;
@@ -201,10 +202,13 @@ fn check(call: &str, status: Status) -> Result<()> {
     if status == RESULT_SUCCESS {
         return Ok(());
     }
+    if status == RESULT_ERROR_INSUFFICIENT_PERMISSIONS {
+        // Intel only allows I²C/AUX writes from elevated processes.
+        return Err(NeedsElevation(format!("{call} failed: {status:#X} (INSUFFICIENT_PERMISSIONS)")).into());
+    }
     let name = match status {
         0x4000_0001 => "NOT_INITIALIZED",
         0x4000_0003 => "DEVICE_LOST",
-        0x4000_0006 => "INSUFFICIENT_PERMISSIONS",
         0x4000_0007 => "NOT_AVAILABLE",
         0x4000_0009 => "UNSUPPORTED_VERSION",
         0x4000_000a => "UNSUPPORTED_FEATURE",
@@ -343,7 +347,7 @@ impl RawDdcChannel for IgclChannel {
         }
     }
 
-    // Writes need administrator rights (INSUFFICIENT_PERMISSIONS otherwise).
+    // Fails with `NeedsElevation` unless the process is elevated.
     fn write(&self, packet: &Packet) -> Result<()> {
         match self.bus {
             // `offset` goes out right after the I²C address, which is where
@@ -405,6 +409,13 @@ mod tests {
         assert_eq!(std::mem::offset_of!(I2cAccessArgs, data), 40);
         assert_eq!(size_of::<AuxAccessArgs>(), 176);
         assert_eq!(std::mem::offset_of!(AuxAccessArgs, data), 40);
+    }
+
+    #[test]
+    fn insufficient_permissions_asks_for_elevation() {
+        let err = check("ctlAUXAccess", RESULT_ERROR_INSUFFICIENT_PERMISSIONS).unwrap_err();
+        assert!(err.is::<NeedsElevation>());
+        assert!(!check("ctlAUXAccess", 0x4000_000f).unwrap_err().is::<NeedsElevation>());
     }
 
     #[test]
