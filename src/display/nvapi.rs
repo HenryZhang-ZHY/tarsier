@@ -7,11 +7,11 @@ use std::ptr::null_mut;
 use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow, bail};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::core::{s, w};
+use windows::core::s;
 
 use super::channel::{DisplayTarget, RawDdcChannel, RawDdcProvider};
 use super::ddcci::Packet;
+use super::dylib::{self, fn_ptr};
 
 type Handle = *mut c_void;
 type Status = i32;
@@ -68,15 +68,13 @@ unsafe fn load() -> Result<Api, String> {
     type Query = unsafe extern "C" fn(u32) -> *mut c_void;
     type Initialize = unsafe extern "C" fn() -> Status;
     unsafe {
-        // Never freed: the function pointers live for the whole process.
-        let lib = if cfg!(target_pointer_width = "64") {
-            LoadLibraryW(w!("nvapi64.dll"))
+        let dll = if cfg!(target_pointer_width = "64") {
+            "nvapi64.dll"
         } else {
-            LoadLibraryW(w!("nvapi.dll"))
-        }
-        .map_err(|_| "nvapi64.dll not found (no NVIDIA driver)".to_string())?;
-        let query = GetProcAddress(lib, s!("nvapi_QueryInterface")).ok_or("nvapi_QueryInterface missing")?;
-        let query = std::mem::transmute::<unsafe extern "system" fn() -> isize, Query>(query);
+            "nvapi.dll"
+        };
+        let lib = dylib::load_system_library(dll).map_err(|e| format!("{e} (no NVIDIA driver)"))?;
+        let query: Query = dylib::export(lib, s!("nvapi_QueryInterface")).ok_or("nvapi_QueryInterface missing")?;
         let get = |id: u32, name: &str| {
             let f = query(id);
             if f.is_null() {
@@ -103,15 +101,6 @@ unsafe fn load() -> Result<Api, String> {
             i2c_write: fn_ptr(get(ID_I2C_WRITE, "NvAPI_I2CWrite")?),
         })
     }
-}
-
-/// Reinterprets an address from `nvapi_QueryInterface` as a function pointer.
-///
-/// # Safety
-/// `F` must be the function's real signature.
-unsafe fn fn_ptr<F: Copy>(address: *mut c_void) -> F {
-    const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
-    unsafe { std::mem::transmute_copy(&address) }
 }
 
 /// Turns an `NvAPI_Status` into an error naming the call and the status.

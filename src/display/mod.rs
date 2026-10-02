@@ -3,7 +3,8 @@
 //!
 //! - [`mccs`]: protocol vocabulary and capabilities parsing (pure).
 //! - [`channel`]: transports, i.e. how bytes reach a monitor. One impl per OS
-//!   API or GPU SDK: [`dxva2`] for standard VCP, [`nvapi`] for raw I²C.
+//!   API or GPU SDK: [`dxva2`] for standard VCP, [`nvapi`] and [`igcl`] for
+//!   raw I²C.
 //! - [`ddcci`]: packet encoding for raw I²C transports (pure).
 //! - [`input`]: how a monitor wants its input switched, picked per vendor.
 //! - [`Monitor`]: the facade everything else uses. It owns bus timing and
@@ -15,7 +16,9 @@ mod channel;
 mod ddcci;
 pub mod diagnostics;
 mod dxva2;
+mod dylib;
 mod identity;
+mod igcl;
 mod input;
 pub mod mccs;
 mod nvapi;
@@ -127,9 +130,10 @@ pub fn enumerate(prefs: &BTreeMap<String, InputProtocolPref>) -> Result<Vec<Moni
         .collect())
 }
 
-/// Raw I²C backends, tried in order. AMD (ADL) or Intel (IGCL) go here.
+/// Raw I²C backends, tried in order; each only reaches displays on its own
+/// vendor's GPU. AMD (ADL) would go here.
 fn raw_providers() -> Vec<Box<dyn RawDdcProvider>> {
-    vec![Box::new(nvapi::NvApi)]
+    vec![Box::new(nvapi::NvApi), Box::new(igcl::Igcl)]
 }
 
 fn build(
@@ -206,6 +210,36 @@ mod hardware {
         for m in enumerate(&BTreeMap::new()).unwrap() {
             m.current_input();
             println!("{}", m.report());
+        }
+    }
+
+    /// Proves a raw channel reaches the monitor: nudges brightness through it,
+    /// reads it back through the standard API, then restores it.
+    #[test]
+    #[ignore = "talks to real monitors"]
+    fn raw_write_round_trip() {
+        for m in enumerate(&BTreeMap::new()).unwrap() {
+            let Some(raw) = &m.raw else {
+                println!("{}: no raw channel", m.name);
+                continue;
+            };
+            let before = m.get(mccs::VCP_BRIGHTNESS).unwrap().current;
+            let nudged = if before < 100 { before + 1 } else { before - 1 };
+            let set = |v: u32| {
+                m.on_bus(|| {
+                    raw.write(&ddcci::Packet::set_vcp(
+                        ddcci::HOST_ADDR,
+                        mccs::VCP_BRIGHTNESS,
+                        v as u16,
+                    ))
+                })
+            };
+            set(nudged).unwrap();
+            thread::sleep(Duration::from_millis(200));
+            let after = m.get(mccs::VCP_BRIGHTNESS).unwrap().current;
+            set(before).unwrap();
+            println!("{}: {before} -> raw write {nudged} -> read back {after}", m.name);
+            assert_eq!(after, nudged, "raw write did not reach the monitor");
         }
     }
 }
