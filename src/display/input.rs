@@ -51,31 +51,39 @@ pub enum ProtocolKind {
     Lg,
 }
 
+/// A chosen protocol and why, for diagnostics.
+pub struct Selected {
+    pub protocol: Box<dyn InputProtocol>,
+    pub reason: String,
+}
+
 /// Picks the protocol for a monitor: the user's choice, else the first
 /// matching quirk, else the VESA standard.
-pub fn select(
-    identity: Option<&Identity>,
-    caps: Option<&Capabilities>,
-    pref: Option<&InputProtocolPref>,
-) -> Box<dyn InputProtocol> {
+pub fn select(identity: Option<&Identity>, caps: Option<&Capabilities>, pref: Option<&InputProtocolPref>) -> Selected {
     let model = caps.and_then(|c| c.model.as_deref());
-    match pref {
+    let (protocol, reason): (Box<dyn InputProtocol>, String) = match pref {
         Some(InputProtocolPref {
             kind: ProtocolKind::Mccs,
             ..
-        }) => Box::new(Mccs),
+        }) => (Box::new(Mccs), "config.json input_protocol".into()),
         Some(InputProtocolPref {
             kind: ProtocolKind::Lg,
             values,
-        }) => Box::new(LgSideChannel::new(model, values)),
-        None => identity
-            .and_then(|id| QUIRKS.iter().find(|q| (q.matches)(id, caps)))
-            .map_or_else(|| Box::new(Mccs) as Box<dyn InputProtocol>, |q| (q.build)(model)),
-    }
+        }) => (
+            Box::new(LgSideChannel::new(model, values)),
+            "config.json input_protocol".into(),
+        ),
+        None => match identity.and_then(|id| QUIRKS.iter().find(|q| (q.matches)(id, caps))) {
+            Some(q) => ((q.build)(model), format!("quirk: {}", q.name)),
+            None => (Box::new(Mccs), "default".into()),
+        },
+    };
+    Selected { protocol, reason }
 }
 
 /// A monitor family whose input switching departs from the standard.
 pub struct Quirk {
+    pub name: &'static str,
     pub matches: fn(&Identity, Option<&Capabilities>) -> bool,
     /// Builds the protocol, given the model name from the capabilities string.
     pub build: fn(Option<&str>) -> Box<dyn InputProtocol>,
@@ -86,6 +94,7 @@ pub const QUIRKS: &[Quirk] = &[
     // through VCP 0xF4 on the service address instead (and list 0xF4 in
     // their capabilities).
     Quirk {
+        name: "LG side channel (vendor GSM, VCP F4 listed)",
         matches: |id, caps| id.manufacturer == "GSM" && caps.is_some_and(|c| c.supports(LG_INPUT_CODE)),
         build: |model| Box::new(LgSideChannel::new(model, &BTreeMap::new())),
     },
@@ -178,6 +187,9 @@ mod tests {
     }
 
     impl VcpChannel for FakeVcp {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
         fn get(&self, code: u8) -> Result<Feature> {
             assert_eq!(code, VCP_INPUT_SOURCE);
             Ok(Feature {
@@ -242,7 +254,7 @@ mod tests {
     #[test]
     fn lg_monitor_with_f4_gets_side_channel() {
         let caps = mccs::parse_capabilities(LG_28MQ780_CAPS);
-        assert_eq!(select(Some(&lg()), Some(&caps), None).name(), "lg");
+        assert_eq!(select(Some(&lg()), Some(&caps), None).protocol.name(), "lg");
     }
 
     #[test]
@@ -252,22 +264,28 @@ mod tests {
             manufacturer: "DEL".into(),
             product: 0x4321,
         };
-        assert_eq!(select(Some(&dell), Some(&caps), None).name(), "mccs");
+        assert_eq!(select(Some(&dell), Some(&caps), None).protocol.name(), "mccs");
         // An LG without the side channel.
         let old_lg = mccs::parse_capabilities("(vcp(10 12 60(0F 11)))");
-        assert_eq!(select(Some(&lg()), Some(&old_lg), None).name(), "mccs");
-        assert_eq!(select(None, Some(&caps), None).name(), "mccs");
+        assert_eq!(select(Some(&lg()), Some(&old_lg), None).protocol.name(), "mccs");
+        assert_eq!(select(None, Some(&caps), None).protocol.name(), "mccs");
     }
 
     #[test]
     fn preference_overrides_detection() {
         let caps = mccs::parse_capabilities(LG_28MQ780_CAPS);
-        assert_eq!(
-            select(Some(&lg()), Some(&caps), Some(&pref(ProtocolKind::Mccs))).name(),
-            "mccs"
-        );
+        let forced = select(Some(&lg()), Some(&caps), Some(&pref(ProtocolKind::Mccs)));
+        assert_eq!(forced.protocol.name(), "mccs");
+        assert_eq!(forced.reason, "config.json input_protocol");
         let lg_pref = pref(ProtocolKind::Lg);
-        assert_eq!(select(None, None, Some(&lg_pref)).name(), "lg");
+        assert_eq!(select(None, None, Some(&lg_pref)).protocol.name(), "lg");
+    }
+
+    #[test]
+    fn selection_explains_itself() {
+        let caps = mccs::parse_capabilities(LG_28MQ780_CAPS);
+        assert!(select(Some(&lg()), Some(&caps), None).reason.starts_with("quirk: LG"));
+        assert_eq!(select(None, None, None).reason, "default");
     }
 
     #[test]

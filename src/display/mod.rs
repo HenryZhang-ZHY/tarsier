@@ -8,17 +8,21 @@
 //! - [`input`]: how a monitor wants its input switched, picked per vendor.
 //! - [`Monitor`]: the facade everything else uses. It owns bus timing and
 //!   retries so transports and protocols stay simple.
+//! - [`diagnostics`] / [`trace`]: developer mode. Channels are wrapped in
+//!   tracing decorators, so nothing else knows about it.
 
 mod channel;
 mod ddcci;
+pub mod diagnostics;
 mod dxva2;
 mod identity;
 mod input;
 pub mod mccs;
 mod nvapi;
+mod trace;
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -26,10 +30,12 @@ use anyhow::Result;
 
 pub use self::channel::Feature;
 use self::channel::{RawDdcChannel, RawDdcProvider, VcpChannel};
+use self::diagnostics::Diagnostics;
 use self::identity::Identity;
 pub use self::input::InputProtocolPref;
 use self::input::{Channels, InputProtocol};
 use self::mccs::Capabilities;
+use self::trace::{Trace, TraceEntry, TracedRaw, TracedVcp};
 
 const RETRIES: usize = 3;
 /// MCCS asks hosts to wait at least 50ms between commands.
@@ -41,6 +47,8 @@ pub struct Monitor {
     pub id: String,
     pub name: String,
     pub caps: Option<Capabilities>,
+    pub diagnostics: Diagnostics,
+    trace: Arc<Trace>,
     /// Serialises all traffic to this monitor, whatever the transport.
     bus: Mutex<()>,
     vcp: Box<dyn VcpChannel>,
@@ -69,6 +77,16 @@ impl Monitor {
     /// Switches to `input`, an MCCS input value.
     pub fn switch_input(&self, input: u8) -> Result<()> {
         self.on_bus(|| self.input.switch(&self.channels(), input))
+    }
+
+    /// Recent commands sent to this monitor, oldest first.
+    pub fn trace(&self) -> Vec<TraceEntry> {
+        self.trace.entries()
+    }
+
+    /// Plain-text diagnostics for bug reports.
+    pub fn report(&self) -> String {
+        diagnostics::monitor_section(&self.id, &self.name, &self.diagnostics, &self.trace())
     }
 
     fn channels(&self) -> Channels<'_> {
@@ -105,11 +123,7 @@ pub fn enumerate(prefs: &BTreeMap<String, InputProtocolPref>) -> Result<Vec<Moni
     let providers = raw_providers();
     Ok(dxva2::enumerate()?
         .into_iter()
-        .map(|found| {
-            let raw = providers.iter().find_map(|p| p.open(&found.gdi_name));
-            let pref = prefs.get(&found.id);
-            build(found, raw, pref)
-        })
+        .map(|found| build(found, &providers, prefs))
         .collect())
 }
 
@@ -118,33 +132,67 @@ fn raw_providers() -> Vec<Box<dyn RawDdcProvider>> {
     vec![Box::new(nvapi::NvApi)]
 }
 
-fn build(found: dxva2::Found, raw: Option<Box<dyn RawDdcChannel>>, pref: Option<&InputProtocolPref>) -> Monitor {
-    let caps = retry(|| {
-        let raw = found.channel.capabilities();
+fn build(
+    found: dxva2::Found,
+    providers: &[Box<dyn RawDdcProvider>],
+    prefs: &BTreeMap<String, InputProtocolPref>,
+) -> Monitor {
+    let trace = Arc::new(Trace::default());
+    let vcp = TracedVcp {
+        inner: Box::new(found.channel),
+        trace: trace.clone(),
+    };
+
+    let mut raw_backends = Vec::new();
+    let mut raw: Option<Box<dyn RawDdcChannel>> = None;
+    for provider in providers {
+        match provider.open(&found.gdi_name) {
+            Ok(channel) => {
+                raw_backends.push((provider.name(), Ok(())));
+                raw = Some(Box::new(TracedRaw {
+                    inner: channel,
+                    trace: trace.clone(),
+                }));
+                break;
+            }
+            Err(e) => raw_backends.push((provider.name(), Err(format!("{e:#}")))),
+        }
+    }
+
+    let capabilities = retry(|| {
+        let raw = vcp.capabilities();
         thread::sleep(COMMAND_GAP);
         raw
     })
-    .ok()
-    .map(|raw| mccs::parse_capabilities(&raw));
+    .map_err(|e| format!("{e:#}"));
+    let caps = capabilities.as_deref().ok().map(mccs::parse_capabilities);
     let name = found
         .friendly_name
         .or_else(|| caps.as_ref().and_then(|c| c.model.clone()))
         .unwrap_or(found.description);
     let identity = Identity::from_device_path(&found.id);
-    let input = input::select(identity.as_ref(), caps.as_ref(), pref);
-    log::info!(
-        "{name}: {identity:?}, input protocol {}, raw channel {}",
-        input.name(),
-        raw.as_ref().map_or("none", |r| r.name())
-    );
+    let selected = input::select(identity.as_ref(), caps.as_ref(), prefs.get(&found.id));
+
+    let diagnostics = Diagnostics {
+        gdi_name: found.gdi_name,
+        adapter: found.adapter,
+        identity,
+        capabilities,
+        input_protocol: selected.protocol.name(),
+        input_protocol_reason: selected.reason,
+        raw_backends,
+    };
+    log::info!("{name}: {:?}", diagnostics.rows());
     Monitor {
         id: found.id,
         name,
         caps,
+        diagnostics,
+        trace,
         bus: Mutex::new(()),
-        vcp: Box::new(found.channel),
+        vcp: Box::new(vcp),
         raw,
-        input,
+        input: selected.protocol,
     }
 }
 
@@ -156,14 +204,8 @@ mod hardware {
     #[ignore = "talks to real monitors"]
     fn probe() {
         for m in enumerate(&BTreeMap::new()).unwrap() {
-            println!(
-                "PROBE {} | {} | protocol {} | raw {} | current {:?}",
-                m.id,
-                m.name,
-                m.input.name(),
-                m.raw.as_ref().map_or("none", |r| r.name()),
-                m.current_input()
-            );
+            m.current_input();
+            println!("{}", m.report());
         }
     }
 }

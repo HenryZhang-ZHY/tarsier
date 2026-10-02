@@ -16,8 +16,8 @@ use gpui_kit::*;
 use crate::breaks::{BreakKind, Phase};
 use crate::config;
 use crate::controller::{Controller, MonitorEntry, local_date, now_ts};
-use crate::display::Feature;
 use crate::display::mccs::{VCP_BRIGHTNESS, VCP_CONTRAST};
+use crate::display::{self, Feature};
 use crate::stats::{self, GOOD_SCORE};
 use crate::ui::format_minutes;
 use crate::ui::number_field::{NumberField, Range};
@@ -226,7 +226,29 @@ impl MainWindow {
                         n => format!("已连接 {n} 台支持 DDC/CI 的显示器"),
                     }),
             )
-            .child(refresh);
+            .child(
+                h_flex()
+                    .gap_1()
+                    .when(c.config.developer_mode, |el| {
+                        let controller = self.controller.clone();
+                        el.child(
+                            Button::new("copy-diagnostics")
+                                .ghost()
+                                .small()
+                                .icon(Icon::new(Lucide::Copy))
+                                .label("复制诊断报告")
+                                .on_click(move |_, _, cx| {
+                                    let report = controller.read(cx).diagnostics_report();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(report));
+                                    controller.update(cx, |c, cx| {
+                                        c.notice = Some("诊断报告已复制到剪贴板".into());
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
+                    .child(refresh),
+            );
 
         let mut list = v_flex().gap_4().child(header);
         if c.monitors.is_empty() && !c.scanning {
@@ -361,6 +383,7 @@ impl MainWindow {
                     .child(pair_picker(1))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(toggle_hint)),
             )
+            .when(c.config.developer_mode, |el| el.child(render_diagnostics(m, cx)))
     }
 
     // ---- breaks tab --------------------------------------------------------
@@ -655,13 +678,23 @@ impl MainWindow {
                 }))
         };
 
-        let general = card(cx).gap_4().child(section_label("通用", cx)).child(toggle_row(
-            "autostart",
-            "开机自动启动",
-            "登录 Windows 后在托盘里静默运行",
-            c.autostart,
-            |c, v, cx| c.set_autostart(v, cx),
-        ));
+        let general = card(cx)
+            .gap_4()
+            .child(section_label("通用", cx))
+            .child(toggle_row(
+                "autostart",
+                "开机自动启动",
+                "登录 Windows 后在托盘里静默运行",
+                c.autostart,
+                |c, v, cx| c.set_autostart(v, cx),
+            ))
+            .child(toggle_row(
+                "developer-mode",
+                "开发者模式",
+                "在「显示器」页显示 DDC/CI 诊断信息和命令记录，并在日志里记录每条命令",
+                c.config.developer_mode,
+                |c, v, cx| c.set_developer_mode(v, cx),
+            ));
 
         let breaks = card(cx)
             .gap_4()
@@ -826,6 +859,53 @@ impl Render for MainWindow {
 
 fn feature_key(monitor_id: &str, code: u8) -> String {
     format!("{monitor_id}#{code}")
+}
+
+/// Developer mode panel: how this monitor is driven and what was sent to it.
+fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
+    /// Commands shown in the panel; the copied report has the full trace.
+    const RECENT: usize = 12;
+    let theme = cx.theme();
+    let mono = |text: String| div().font_family("Consolas").text_xs().child(text);
+    let rows = m.dev.diagnostics.rows().into_iter().map(|(label, value)| {
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(
+                div()
+                    .w(px(56.))
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+            .child(mono(value).flex_1().min_w_0())
+    });
+    let trace = m.dev.trace();
+    let lines = trace.iter().rev().take(RECENT).rev().map(|entry| {
+        let failed = entry.result.is_err();
+        mono(display::diagnostics::trace_line(entry)).when(failed, |el| el.text_color(theme.danger))
+    });
+    v_flex()
+        .gap_2()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(Icon::new(Lucide::Bug).size(px(14.)))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("诊断信息")),
+        )
+        .child(mono(m.id().to_string()).text_color(theme.muted_foreground))
+        .children(rows)
+        .child(section_label("最近的命令", cx))
+        .when(trace.is_empty(), |el| {
+            el.child(div().text_xs().text_color(theme.muted_foreground).child("（暂无）"))
+        })
+        .children(lines)
 }
 
 fn card(cx: &App) -> Div {

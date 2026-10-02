@@ -79,6 +79,7 @@ impl Controller {
         let config: Config = config::load(&config::config_path());
         let stats: Stats = config::load(&config::stats_path());
         let tracker = BreakTracker::new(config.breaks.settings(), now_ts());
+        crate::logger::set_verbose(config.developer_mode);
         let entity = cx.new(|cx| {
             let mut this = Controller {
                 config,
@@ -534,6 +535,40 @@ impl Controller {
         self.tracker.set_settings(self.config.breaks.settings());
         self.save_config();
         cx.notify();
+    }
+
+    pub fn set_developer_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        crate::logger::set_verbose(enabled);
+        self.update_config(cx, |cfg| cfg.developer_mode = enabled);
+    }
+
+    /// Everything needed to debug monitor control on this machine, as text.
+    pub fn diagnostics_report(&self) -> String {
+        let mut out = format!(
+            "# tarsier v{} diagnostics ({} {}, {})
+
+",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        for m in &self.monitors {
+            out.push_str(&m.dev.report());
+            let prefs = serde_json::to_string(&self.monitor_prefs(m.id())).unwrap_or_default();
+            out.push_str(&format!(
+                "config: {prefs}
+
+"
+            ));
+        }
+        if self.monitors.is_empty() {
+            out.push_str(
+                "(no DDC/CI monitors found)
+",
+            );
+        }
+        out
     }
 
     pub fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {

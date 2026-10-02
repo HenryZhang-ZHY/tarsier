@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use anyhow::{Context as _, Result, bail};
 use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::{HANDLE, LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW};
+use windows::Win32::Graphics::Gdi::{
+    DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    MONITORINFOEXW,
+};
 use windows::core::BOOL;
 
 use super::channel::{Feature, VcpChannel};
@@ -30,6 +33,10 @@ impl Drop for Dxva2Channel {
 }
 
 impl VcpChannel for Dxva2Channel {
+    fn name(&self) -> &'static str {
+        "dxva2"
+    }
+
     fn get(&self, code: u8) -> Result<Feature> {
         let mut current = 0u32;
         let mut max = 0u32;
@@ -66,6 +73,8 @@ pub struct Found {
     pub gdi_name: String,
     /// Monitor device path (stable across reboots), or a positional fallback.
     pub id: String,
+    /// The display adapter (GPU) driving this output.
+    pub adapter: Option<String>,
     /// EDID friendly name, if Windows knows one.
     pub friendly_name: Option<String>,
     pub description: String,
@@ -74,6 +83,7 @@ pub struct Found {
 /// Enumerate all monitors that expose a physical-monitor handle.
 pub fn enumerate() -> Result<Vec<Found>> {
     let names = display_names();
+    let adapters = adapters();
     let mut hmonitors: Vec<HMONITOR> = Vec::new();
     unsafe extern "system" fn collect(hmon: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
         let list = unsafe { &mut *(data.0 as *mut Vec<HMONITOR>) };
@@ -109,12 +119,29 @@ pub fn enumerate() -> Result<Vec<Found>> {
                     .filter(|p| !p.is_empty())
                     .unwrap_or_else(|| format!("{gdi_name}#{i}")),
                 friendly_name: display.map(|d| d.friendly.clone()).filter(|n| !n.is_empty()),
+                adapter: adapters.get(&gdi_name).cloned(),
                 gdi_name: gdi_name.clone(),
                 description,
             });
         }
     }
     Ok(found)
+}
+
+/// Maps GDI device names to the adapter that drives them.
+fn adapters() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for i in 0.. {
+        let mut device = DISPLAY_DEVICEW {
+            cb: size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { EnumDisplayDevicesW(None, i, &mut device, 0) }.as_bool() {
+            break;
+        }
+        map.insert(wide_to_string(&device.DeviceName), wide_to_string(&device.DeviceString));
+    }
+    map
 }
 
 fn gdi_device_name(hmon: HMONITOR) -> Option<String> {

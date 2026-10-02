@@ -10,12 +10,11 @@ use log::{Level, Log, Metadata, Record};
 
 struct Logger {
     file: Option<Mutex<File>>,
-    level: Level,
 }
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= self.level
+        metadata.level() <= log::max_level()
     }
 
     fn log(&self, record: &Record) {
@@ -54,12 +53,19 @@ pub fn init() {
         .open(path)
         .ok()
         .map(Mutex::new);
-    let level = if cfg!(debug_assertions) {
+    if log::set_boxed_logger(Box::new(Logger { file })).is_ok() {
+        set_verbose(false);
+    }
+}
+
+/// Developer mode logs at debug level, including every DDC/CI command.
+pub fn set_verbose(verbose: bool) {
+    let level = if verbose {
+        Level::Debug
+    } else if cfg!(debug_assertions) {
         Level::Info
     } else {
         Level::Warn
     };
-    if log::set_boxed_logger(Box::new(Logger { file, level })).is_ok() {
-        log::set_max_level(level.to_level_filter());
-    }
+    log::set_max_level(level.to_level_filter());
 }

@@ -6,7 +6,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::ptr::null_mut;
 use std::sync::OnceLock;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::core::{s, w};
 
@@ -55,20 +55,18 @@ struct Api {
     i2c_write: unsafe extern "C" fn(Handle, *mut I2cInfo) -> Status,
 }
 
-/// The loaded driver API, or `None` without an NVIDIA driver.
-fn api() -> Option<&'static Api> {
-    static API: OnceLock<Option<Api>> = OnceLock::new();
-    API.get_or_init(|| {
-        let api = unsafe { load() };
-        if api.is_none() {
-            log::info!("NVAPI not available");
-        }
-        api
-    })
-    .as_ref()
+/// The loaded driver API, or why it is unavailable.
+fn api() -> Result<&'static Api> {
+    static API: OnceLock<Result<Api, String>> = OnceLock::new();
+    match API.get_or_init(|| unsafe { load() }) {
+        Ok(api) => Ok(api),
+        Err(e) => Err(anyhow!("{e}")),
+    }
 }
 
-unsafe fn load() -> Option<Api> {
+unsafe fn load() -> Result<Api, String> {
+    type Query = unsafe extern "C" fn(u32) -> *mut c_void;
+    type Initialize = unsafe extern "C" fn() -> Status;
     unsafe {
         // Never freed: the function pointers live for the whole process.
         let lib = if cfg!(target_pointer_width = "64") {
@@ -76,50 +74,103 @@ unsafe fn load() -> Option<Api> {
         } else {
             LoadLibraryW(w!("nvapi.dll"))
         }
-        .ok()?;
-        let query: unsafe extern "C" fn(u32) -> *mut c_void =
-            std::mem::transmute(GetProcAddress(lib, s!("nvapi_QueryInterface"))?);
-        let get = |id: u32| {
+        .map_err(|_| "nvapi64.dll not found (no NVIDIA driver)".to_string())?;
+        let query = GetProcAddress(lib, s!("nvapi_QueryInterface")).ok_or("nvapi_QueryInterface missing")?;
+        let query = std::mem::transmute::<unsafe extern "system" fn() -> isize, Query>(query);
+        let get = |id: u32, name: &str| {
             let f = query(id);
-            (!f.is_null()).then_some(f)
+            if f.is_null() {
+                Err(format!("{name} missing from this driver"))
+            } else {
+                Ok(f)
+            }
         };
-        let initialize: unsafe extern "C" fn() -> Status = std::mem::transmute(get(ID_INITIALIZE)?);
-        let status = initialize();
-        if status != 0 {
-            log::warn!("NvAPI_Initialize failed ({status})");
-            return None;
-        }
-        Some(Api {
-            get_display: std::mem::transmute(get(ID_GET_ASSOCIATED_NVIDIA_DISPLAY_HANDLE)?),
-            gpus_from_display: std::mem::transmute(get(ID_GET_PHYSICAL_GPUS_FROM_DISPLAY)?),
-            output_id: std::mem::transmute(get(ID_GET_ASSOCIATED_DISPLAY_OUTPUT_ID)?),
-            i2c_write: std::mem::transmute(get(ID_I2C_WRITE)?),
+        let initialize: Initialize = fn_ptr(get(ID_INITIALIZE, "NvAPI_Initialize")?);
+        check("NvAPI_Initialize", initialize()).map_err(|e| e.to_string())?;
+        Ok(Api {
+            get_display: fn_ptr(get(
+                ID_GET_ASSOCIATED_NVIDIA_DISPLAY_HANDLE,
+                "NvAPI_GetAssociatedNvidiaDisplayHandle",
+            )?),
+            gpus_from_display: fn_ptr(get(
+                ID_GET_PHYSICAL_GPUS_FROM_DISPLAY,
+                "NvAPI_GetPhysicalGPUsFromDisplay",
+            )?),
+            output_id: fn_ptr(get(
+                ID_GET_ASSOCIATED_DISPLAY_OUTPUT_ID,
+                "NvAPI_GetAssociatedDisplayOutputId",
+            )?),
+            i2c_write: fn_ptr(get(ID_I2C_WRITE, "NvAPI_I2CWrite")?),
         })
     }
+}
+
+/// Reinterprets an address from `nvapi_QueryInterface` as a function pointer.
+///
+/// # Safety
+/// `F` must be the function's real signature.
+unsafe fn fn_ptr<F: Copy>(address: *mut c_void) -> F {
+    const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
+    unsafe { std::mem::transmute_copy(&address) }
+}
+
+/// Turns an `NvAPI_Status` into an error naming the call and the status.
+fn check(call: &str, status: Status) -> Result<()> {
+    if status == 0 {
+        return Ok(());
+    }
+    let name = match status {
+        -1 => "ERROR",
+        -2 => "LIBRARY_NOT_FOUND",
+        -3 => "NO_IMPLEMENTATION",
+        -4 => "API_NOT_INITIALIZED",
+        -5 => "INVALID_ARGUMENT",
+        -6 => "NVIDIA_DEVICE_NOT_FOUND",
+        -7 => "END_ENUMERATION",
+        -8 => "INVALID_HANDLE",
+        -9 => "INCOMPATIBLE_STRUCT_VERSION",
+        -10 => "HANDLE_INVALIDATED",
+        -104 => "NOT_SUPPORTED",
+        _ => "?",
+    };
+    bail!("{call} failed: {status} ({name})")
 }
 
 /// Opens channels for displays on NVIDIA outputs.
 pub struct NvApi;
 
 impl RawDdcProvider for NvApi {
-    fn open(&self, gdi_name: &str) -> Option<Box<dyn RawDdcChannel>> {
+    fn name(&self) -> &'static str {
+        "nvapi"
+    }
+
+    fn open(&self, gdi_name: &str) -> Result<Box<dyn RawDdcChannel>> {
         let api = api()?;
-        let name = CString::new(gdi_name).ok()?;
+        let name = CString::new(gdi_name)?;
         let mut display: Handle = null_mut();
         let mut gpus: [Handle; MAX_PHYSICAL_GPUS] = [null_mut(); MAX_PHYSICAL_GPUS];
         let mut gpu_count = 0u32;
         let mut output = 0u32;
         unsafe {
-            // Fails for displays on another GPU, e.g. the iGPU of a hybrid laptop.
-            if (api.get_display)(name.as_ptr(), &mut display) != 0
-                || (api.gpus_from_display)(display, gpus.as_mut_ptr(), &mut gpu_count) != 0
-                || gpu_count == 0
-                || (api.output_id)(display, &mut output) != 0
-            {
-                return None;
+            // NVIDIA_DEVICE_NOT_FOUND here means another GPU (e.g. the iGPU of
+            // a hybrid laptop) drives this display.
+            check(
+                &format!("NvAPI_GetAssociatedNvidiaDisplayHandle({gdi_name})"),
+                (api.get_display)(name.as_ptr(), &mut display),
+            )?;
+            check(
+                "NvAPI_GetPhysicalGPUsFromDisplay",
+                (api.gpus_from_display)(display, gpus.as_mut_ptr(), &mut gpu_count),
+            )?;
+            if gpu_count == 0 {
+                bail!("NvAPI_GetPhysicalGPUsFromDisplay returned no GPU");
             }
+            check(
+                "NvAPI_GetAssociatedDisplayOutputId",
+                (api.output_id)(display, &mut output),
+            )?;
         }
-        Some(Box::new(NvChannel {
+        Ok(Box::new(NvChannel {
             api,
             gpu: gpus[0],
             output,
@@ -161,11 +212,7 @@ impl RawDdcChannel for NvChannel {
             port_id: 0,
             is_port_id_set: 0,
         };
-        let status = unsafe { (self.api.i2c_write)(self.gpu, &mut info) };
-        if status != 0 {
-            bail!("NvAPI_I2CWrite failed ({status})");
-        }
-        Ok(())
+        check("NvAPI_I2CWrite", unsafe { (self.api.i2c_write)(self.gpu, &mut info) })
     }
 }
 

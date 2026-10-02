@@ -19,6 +19,8 @@ pub struct Config {
     pub brightness_step: u32,
     /// Per-monitor preferences keyed by monitor id.
     pub monitors: BTreeMap<String, MonitorPrefs>,
+    /// Shows DDC/CI diagnostics in the UI and logs at debug level.
+    pub developer_mode: bool,
 }
 
 impl Default for Config {
@@ -28,6 +30,7 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             brightness_step: 10,
             monitors: BTreeMap::new(),
+            developer_mode: false,
         }
     }
 }

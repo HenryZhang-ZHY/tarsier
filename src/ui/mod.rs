@@ -12,6 +12,7 @@ icon_assets!(
     [
         Activity,
         ArrowLeftRight,
+        Bug,
         ChartColumn,
         Coffee,
         Contrast,
