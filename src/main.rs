@@ -3,9 +3,8 @@
 mod breaks;
 mod config;
 mod controller;
-mod ddc;
+mod display;
 mod logger;
-mod mccs;
 mod platform;
 mod stats;
 mod tray;

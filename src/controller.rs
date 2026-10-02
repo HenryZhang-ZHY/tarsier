@@ -10,14 +10,14 @@ use gpui_kit::*;
 
 use crate::breaks::{BreakEvent, BreakTracker, Phase};
 use crate::config::{self, Config, MonitorPrefs};
-use crate::ddc::{self, Feature};
-use crate::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST, VCP_INPUT_SOURCE};
+use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
+use crate::display::{self, Feature};
 use crate::platform;
 use crate::stats::{Session, Stats};
 use crate::ui::break_overlay::{BreakOverlay, FADE_OUT};
 
 pub struct MonitorEntry {
-    pub dev: Arc<ddc::Monitor>,
+    pub dev: Arc<display::Monitor>,
     pub brightness: Option<Feature>,
     pub contrast: Option<Feature>,
     pub current_input: Option<u8>,
@@ -124,7 +124,7 @@ impl Controller {
         self.scanning = true;
         cx.notify();
         let scan = cx.background_executor().spawn(async move {
-            let monitors = ddc::enumerate().unwrap_or_default();
+            let monitors = display::enumerate().unwrap_or_default();
             monitors
                 .into_iter()
                 .map(|dev| {
@@ -296,7 +296,7 @@ impl Controller {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { dev.set(VCP_INPUT_SOURCE, code as u32) })
+                .spawn(async move { dev.switch_input(code) })
                 .await;
             this.update(cx, |this, cx| {
                 this.notice = Some(match result {
@@ -312,7 +312,7 @@ impl Controller {
 
     /// Flip every monitor that has a toggle pair to the other input.
     pub fn toggle_inputs(&mut self, cx: &mut Context<Self>) {
-        let jobs: Vec<(Arc<ddc::Monitor>, [u8; 2], Option<u8>)> = self
+        let jobs: Vec<(Arc<display::Monitor>, [u8; 2], Option<u8>)> = self
             .monitors
             .iter()
             .filter_map(|m| Some((m.dev.clone(), self.toggle_pair(m)?, m.current_input)))
@@ -333,7 +333,7 @@ impl Controller {
                             // Read fresh: the monitor's own buttons may have changed it.
                             let current = dev.current_input().or(cached);
                             let target = if current == Some(a) { b } else { a };
-                            (dev.id.clone(), target, dev.set(VCP_INPUT_SOURCE, target as u32))
+                            (dev.id.clone(), target, dev.switch_input(target))
                         })
                         .collect::<Vec<_>>()
                 })
