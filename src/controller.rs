@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use gpui_kit::component::Theme;
 use gpui_kit::*;
 
 use crate::breaks::{BreakEvent, BreakTracker, Phase};
@@ -542,6 +543,13 @@ impl Controller {
         self.update_config(cx, |cfg| cfg.developer_mode = enabled);
     }
 
+    /// Persist the choice and repaint every window. `Theme::change` refreshes
+    /// them all, so an open window switches without a restart.
+    pub fn set_theme(&mut self, theme: config::ThemePref, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.theme = theme);
+        apply_theme(theme, cx);
+    }
+
     /// Everything needed to debug monitor control on this machine, as text.
     pub fn diagnostics_report(&self) -> String {
         let mut out = format!(
@@ -615,6 +623,13 @@ impl Controller {
             entity.update(cx, |this, _| this.main_window = handle);
         });
     }
+}
+
+/// Apply the saved theme preference. Under `System` this must be re-run
+/// whenever Windows changes appearance, so `main` also calls it from a
+/// window appearance observer.
+pub fn apply_theme(pref: config::ThemePref, cx: &mut App) {
+    Theme::change(pref.resolve(cx.window_appearance()), None, cx);
 }
 
 fn dev_name(monitors: &[MonitorEntry], id: &str) -> String {

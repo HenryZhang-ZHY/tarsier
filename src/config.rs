@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
+use gpui_kit::WindowAppearance;
+use gpui_kit::component::ThemeMode;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::breaks::BreakSettings;
@@ -21,6 +23,42 @@ pub struct Config {
     pub monitors: BTreeMap<String, MonitorPrefs>,
     /// Shows DDC/CI diagnostics in the UI and logs at debug level.
     pub developer_mode: bool,
+    /// Light, dark, or follow the system.
+    pub theme: ThemePref,
+}
+
+/// Which appearance the UI uses. `System` tracks Windows and follows it live.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePref {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+impl ThemePref {
+    /// Label for the settings row, in picker order.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "亮色",
+            Self::Dark => "暗色",
+            Self::System => "跟随系统",
+        }
+    }
+
+    pub const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::System];
+
+    /// The mode to apply, given what the system currently reports. GPUI maps
+    /// Windows' `AppsUseLightTheme` to a `WindowAppearance`, so `System` needs
+    /// no registry reading of our own.
+    pub fn resolve(self, system: WindowAppearance) -> ThemeMode {
+        match self {
+            Self::Light => ThemeMode::Light,
+            Self::Dark => ThemeMode::Dark,
+            Self::System => system.into(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -31,6 +69,7 @@ impl Default for Config {
             brightness_step: 10,
             monitors: BTreeMap::new(),
             developer_mode: false,
+            theme: ThemePref::default(),
         }
     }
 }
@@ -147,6 +186,31 @@ mod tests {
         assert_eq!(cfg.breaks.work_minutes, 30);
         assert_eq!(cfg.breaks.break_minutes, 5);
         assert_eq!(cfg.hotkeys.toggle_input, "ctrl+alt+I");
+    }
+
+    #[test]
+    fn theme_pref_resolves_against_the_system() {
+        let sys_dark = WindowAppearance::Dark;
+        assert_eq!(ThemePref::default(), ThemePref::System);
+        assert_eq!(ThemePref::System.resolve(sys_dark), ThemeMode::Dark);
+        assert_eq!(
+            ThemePref::System.resolve(WindowAppearance::Light),
+            ThemeMode::Light
+        );
+        // An explicit choice ignores the system.
+        assert_eq!(ThemePref::Light.resolve(sys_dark), ThemeMode::Light);
+        assert_eq!(ThemePref::Dark.resolve(WindowAppearance::Light), ThemeMode::Dark);
+    }
+
+    #[test]
+    fn theme_pref_round_trips_as_snake_case() {
+        let json = serde_json::to_string(&ThemePref::System).unwrap();
+        assert_eq!(json, r#""system""#);
+        let cfg: Config = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(cfg.theme, ThemePref::Dark);
+        // Older config files without the key follow the system.
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.theme, ThemePref::System);
     }
 
     #[test]

@@ -105,6 +105,16 @@ impl MainWindow {
             this.sync_controls(window, cx);
             cx.notify();
         });
+        // Windows fires an appearance change when the user flips the system
+        // theme; re-resolve so "跟随系统" tracks it without a restart. An
+        // explicit light/dark choice resolves to the same mode and costs a
+        // repaint.
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            let pref = this.controller.read(cx).config.theme;
+            if pref == config::ThemePref::System {
+                Theme::change(pref.resolve(window.appearance()), Some(window), cx);
+            }
+        });
         let mut numbers = HashMap::new();
         let breaks = controller.read(cx).config.breaks.clone();
         for (key, _, range, get, set) in BREAK_FIELDS {
@@ -123,7 +133,7 @@ impl MainWindow {
             tab: Tab::Monitors,
             sliders: HashMap::new(),
             numbers,
-            _subscriptions: vec![observe],
+            _subscriptions: vec![observe, appearance],
         };
         this.sync_controls(window, cx);
         this
@@ -678,9 +688,46 @@ impl MainWindow {
                 }))
         };
 
+        // Three small buttons rather than a dropdown: every option is visible at
+        // a glance, and this is the same primary/outline pair idiom the monitor
+        // input pickers use.
+        let theme_picker = || {
+            let controller = self.controller.clone();
+            let current = c.config.theme;
+            h_flex()
+                .gap_1()
+                .children(config::ThemePref::ALL.into_iter().map(|pref| {
+                    let controller = controller.clone();
+                    Button::new(SharedString::from(format!("theme-{pref:?}")))
+                        .xsmall()
+                        .when(pref == current, |b| b.primary())
+                        .when(pref != current, |b| b.ghost())
+                        .label(pref.label())
+                        .on_click(move |_, _, cx| {
+                            controller.update(cx, |c, cx| c.set_theme(pref, cx));
+                        })
+                }))
+        };
+
+        let theme_row = h_flex()
+            .justify_between()
+            .gap_4()
+            .child(
+                v_flex()
+                    .child("外观")
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("「跟随系统」会随 Windows 的浅色 / 深色设置实时切换"),
+                    ),
+            )
+            .child(theme_picker());
+
         let general = card(cx)
             .gap_4()
             .child(section_label("通用", cx))
+            .child(theme_row)
             .child(toggle_row(
                 "autostart",
                 "开机自动启动",
