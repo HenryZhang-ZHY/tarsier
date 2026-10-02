@@ -47,6 +47,8 @@ fn main() {
         Theme::global_mut(cx).font_family = "Microsoft YaHei UI".into();
 
         let controller = Controller::init(cx);
+        // The saved preference wins over the system appearance we just synced.
+        controller::apply_theme(controller.read(cx).config.theme, cx);
         let tray = Tray::new().inspect_err(|e| log::error!("tray icon: {e}")).ok();
         let hotkey = Hotkey::new(&controller.read(cx).config.hotkeys)
             .inspect_err(|e| log::error!("hotkeys: {e}"))
