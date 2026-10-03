@@ -1,23 +1,23 @@
-# 开发者模式
+# Developer mode
 
-[English](developer-mode.en.md) · **简体中文** · [返回 README](../README.md)
+**English** · [简体中文](developer-mode.zh.md) · [Back to README](../README.md)
 
-在设置页打开（或把 `config.json` 里的 `developer_mode` 设为 `true`）。
+Turn it on from the Settings tab, or set `developer_mode` to `true` in `config.json`.
 
-打开后：
+Once enabled:
 
-- 「显示器」页每台显示器下面会显示诊断信息：
-  - 驱动它的显卡
-  - EDID
-  - 显示器上报的能力字符串
-  - 选用的输入协议及原因
-  - 每个原始 I²C 后端的结果，失败时附原因
-  - 最近发出的命令和结果
-- 日志会记录每条 DDC/CI 命令，而不只是失败的命令。
-- 「复制诊断报告」按钮会把这些和相关配置一起复制成文本。
+- Each monitor on the Monitors tab gains a diagnostics panel showing:
+  - the GPU driving it
+  - its EDID
+  - the capability string it reports
+  - which input protocol was chosen, and why
+  - the result from each raw I²C backend, with a reason when one fails
+  - the most recent commands and their results
+- The log records every DDC/CI command, not just the failures.
+- The "Copy diagnostics report" button copies all of the above plus the relevant config as text.
 
-## 提 issue
+## Filing an issue
 
-复现问题后点「复制诊断报告」，把文本贴进 issue 就行。报告里不含任何个人信息，只有显示器的 EDID、能力字符串和你的 `monitors.<id>` 配置片段。
+Reproduce the problem, hit "Copy diagnostics report", and paste the text into the issue. It carries nothing personal — just the monitor's EDID, its capability string, and the matching `monitors.<id>` config fragment.
 
-报告开头会写明 tarsier 版本、系统架构、当前时间和进程是否在提权状态下运行——判断 Intel UAC 相关问题时会用到最后一项。
+The report header states the tarsier version, system architecture, current time, and whether the process is running elevated — that last one matters when debugging Intel UAC problems.

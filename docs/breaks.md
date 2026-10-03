@@ -1,28 +1,28 @@
-# 休息提醒与评分
+# Breaks and scoring
 
-[English](breaks.en.md) · **简体中文** · [返回 README](../README.md)
+**English** · [简体中文](breaks.zh.md) · [Back to README](../README.md)
 
-## 提醒
+## Reminders
 
-**工作时间是机械计时**：从上次休息结束起每一秒都算，不看有没有键鼠操作（盯着文字深度阅读同样在用眼）。连续工作到 `work_minutes` 后，tarsier 在所有屏幕上慢慢淡入一层半透明遮罩，像 Fadetop 那样。遮罩不抢焦点，鼠标点击会直接穿过去，所以手头的事可以先做完。
+**Work time is a plain timer**: every second since your last break counts, with or without keyboard/mouse input (deep reading still strains your eyes). After `work_minutes` of work, tarsier fades a translucent overlay in across every screen, Fadetop-style. It never steals focus and mouse clicks pass straight through, so you can finish what you're doing first.
 
-**倒计时只在真的空闲时才走**：晃鼠标不算休息，得真的离开键盘鼠标。不碰键鼠不会被当作离开，计时照常走；电脑睡眠超过 `break_minutes` 会被自动记为一次休息。离开工位时提醒照常弹出，你离开够久它会自己算作休息完成。
+**The countdown only runs while you are genuinely idle** — jiggling the mouse doesn't count as a break; you have to actually leave the keyboard and mouse. Leaving the keyboard and mouse alone is not treated as leaving — the timer keeps running. Sleeping for longer than `break_minutes` is recorded as a break automatically. If you step away, the reminder still appears and completes by itself once you have been hands-off long enough.
 
-推迟或跳过请用托盘菜单，或主窗口的「休息」页。
+To snooze or skip, use the tray menu or the Breaks tab of the main window.
 
-## 忽略
+## Ignoring
 
-如果一直顶着遮罩工作，到 `work_minutes` 的 2 倍时遮罩会自动淡出，这次记为**忽略**，再过 `snooze_minutes` 后重新提醒。
+If you keep working under the overlay, it fades out on its own at twice `work_minutes`, the session is recorded as **ignored**, and the reminder comes back after `snooze_minutes`.
 
-## 不打扰
+## Staying out of the way
 
-`respect_fullscreen` 打开时，检测到全屏游戏、视频或 PPT 演示会推迟提醒。
+With `respect_fullscreen` enabled, reminders are held while a fullscreen game, video, or presentation is detected.
 
-## 评分规则
+## Scoring rules
 
-- 一段工作的时长不超过目标的 110% 就是 100 分；到 150% 降到 50 分，到 190% 降到 0 分。
-- 每日健康分是当天各段分数按工作时长的加权平均。当天使用不满 15 分钟不评分。
-- 每次休息按这段工作的分数得 10 / 6 / 2 分积分。跳过、推迟和忽略都不会直接扣分，但会让这段工作变长，分数自然就低了。
-- 连续达标（≥ 80 分）的天数会累加，没用电脑的日子不会打断连续记录。
+- A session scoring 100 runs up to 110% of the target. At 150% it is worth 50, and at 190% it reaches 0.
+- The daily health score is the length-weighted average of that day's session scores. Days with under 15 minutes of use aren't scored.
+- Each break earns 10 / 6 / 2 points from that session's score. Skipping, snoozing, and ignoring cost nothing directly, but they lengthen the session, which lowers the score on its own.
+- Consecutive days at or above 80 accumulate as a streak; days you don't use the computer don't break it.
 
-健康分 ≥ 80 记为一个达标日。数据存在 `stats.json` 里。
+A health score of 80 or above counts as a good day. The data lives in `stats.json`.

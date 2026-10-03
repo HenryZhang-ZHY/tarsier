@@ -1,24 +1,24 @@
-# 已知限制
+# Known limitations
 
-[English](limitations.en.md) · **简体中文** · [返回 README](../README.md)
+**English** · [简体中文](limitations.zh.md) · [Back to README](../README.md)
 
-## 显示器控制
+## Monitor control
 
-- 只支持外接显示器的 DDC/CI。笔记本内置屏和部分 USB 扩展坞后面的显示器无法调节。
-- 不少显示器需要先在 OSD 菜单里打开 DDC/CI，tarsier 才能控制它。
-- 厂商私有通道接在 AMD 显卡上时还不能切换输入。
-- 接在 Intel 核显上时，每次通过私有通道切换输入都要确认一次 UAC，见[厂商私有通道](private-channels.md)。
+- Only DDC/CI on external monitors. Built-in laptop panels and monitors behind some USB docks can't be adjusted.
+- Many monitors require DDC/CI to be enabled in their OSD menu before tarsier can talk to them.
+- Input switching over a vendor-private channel doesn't work on AMD GPUs yet.
+- On Intel integrated graphics, every switch over the private channel needs a UAC confirmation — see [Vendor-private channels](private-channels.md).
 
-## 一台显示器、多台电脑
+## One monitor, several computers
 
-每台电脑上都装 tarsier，各自在「显示器」页把接着的电脑列出来并起好名字。名字跟着端口走（DisplayPort 2 在哪台机器上都指同一台电脑），所以在一台上建好之后，可以把配置复制到其余几台。
+Install tarsier on each machine and list the computers sharing the monitor on the Monitors tab, with a name for each. Names belong to the port — DisplayPort 2 means the same computer everywhere — so once one machine is set up its config can be copied to the rest.
 
-大多数显示器即使当前没在显示某一路信号，也会响应那一路 DDC/CI 命令，所以在哪台电脑上按 `Ctrl+Alt+I` 都能切换。如果你的显示器在非活动输入上不响应，就只能在当前显示的那台电脑上切过去。
+Most monitors respond to DDC/CI commands on an input even while they're displaying a different one, so `Ctrl+Alt+I` on any of them will switch. If yours ignores commands on the inactive input, you can only switch from whichever computer is currently driving the display.
 
-**两台**时快捷键是盲翻，一次按键搞定；读不出显示器在哪一路时它不会硬猜，而是弹出快切面板让你选。**三台以上**时它直接弹出快切面板，让你按数字选 —— 不做循环，因为循环要路过中间那台：两次 DDC/CI 写入、两次黑屏，而且在上面那类显示器上第二跳根本发不出去。
+With **two** computers the hotkey is a blind flip: one press, no thinking. When it cannot read which input the monitor is on it does not guess — it opens the quick-switch panel instead of silently doing nothing. With **three or more** it opens the panel directly so you can name the destination by number. It deliberately does not cycle, because cycling would have to pass through the intermediate machine — two DDC/CI writes, two screen blanks — and on the kind of monitor described above the second hop would never arrive at all.
 
-托盘菜单里只有「切换到 X」这类目标条目，没有「翻到另一台」那种依赖当前状态的项 —— 菜单不假装知道你现在在哪台。
+The tray menu lists destinations ("switch to X") and has no "flip to the other one" entry: a flip depends on the monitor's current input, and the menu does not pretend to know it.
 
-## 平台
+## Platform
 
-只支持 Windows。DDC/CI 之外的所有功能（托盘、快捷键、自启动、遮罩窗口）都直接调 Win32。
+Windows only. Everything beyond DDC/CI — the tray, hotkeys, autostart, the overlay window — calls Win32 directly.

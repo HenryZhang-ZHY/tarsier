@@ -1,39 +1,39 @@
-# 厂商私有通道
+# Vendor-private channels
 
-[English](private-channels.en.md) · **简体中文** · [返回 README](../README.md)
+**English** · [简体中文](private-channels.zh.md) · [Back to README](../README.md)
 
-## 问题
+## The problem
 
-新款 LG 显示器（例如 28MQ780）会**确认** VCP 0x60 的写入，但实际并不切换输入。它们只认从主机地址 `0x50` 发出的 VCP 0xF4（[ddcutil wiki](https://github.com/rockowitz/ddcutil/wiki/Switching-input-source-on-LG-monitors)）。
+Recent LG monitors (the 28MQ780, for instance) **acknowledge** a write to VCP 0x60 but don't actually switch input. They only accept VCP 0xF4 sent from host address `0x50` ([ddcutil wiki](https://github.com/rockowitz/ddcutil/wiki/Switching-input-source-on-LG-monitors)).
 
-Windows 的显示器 API（`SetVCPFeature` 之类）固定用 `0x51`，这个地址改不了。
+Windows' monitor API (`SetVCPFeature` and friends) is hardcoded to `0x51`, and that address can't be changed.
 
-## 办法
+## The workaround
 
-绕开显示器 API，借显卡驱动直接往 I²C 总线上发包。
+Skip the monitor API and send the packet straight onto the I²C bus through the GPU driver.
 
-| 显卡 | 原始 I²C 后端 |
+| GPU | Raw I²C backend |
 | --- | --- |
-| NVIDIA | NVAPI（`nvapi64.dll`） |
-| Intel | IGCL（驱动自带的 `ControlLib.dll`）。DisplayPort / USB-C 走 I²C-over-AUX，HDMI 走 DDC 引脚 |
-| AMD | 暂不支持 |
+| NVIDIA | NVAPI (`nvapi64.dll`) |
+| Intel | IGCL (the driver's own `ControlLib.dll`). DisplayPort / USB-C go over I²C-over-AUX, HDMI over the DDC pins |
+| AMD | Not supported yet |
 
-注意是看**驱动这台显示器的那块显卡**，不是插了线的那块。混合显卡笔记本上外接口常常接在核显上。
+Note that what matters is the GPU **driving that monitor**, not the one the cable is plugged into. On hybrid-graphics laptops the external port often hangs off the integrated GPU.
 
-tarsier 会先尝试标准 VCP 0x60，写入后回读确认；如果显示器确认了却没真的切换，就自动回落到私有通道。也可以用 `input_protocol` 手工指定，跳过检测。
+tarsier tries the standard VCP 0x60 first and reads back to confirm. If the monitor acknowledged the write without actually switching, it falls back to the private channel automatically. You can also force the choice with `input_protocol` to skip detection.
 
 ## UAC
 
-Intel 驱动只允许管理员权限的进程写 I²C。tarsier 本身不以管理员身份运行，需要时用管理员身份临时启动一个只发这一条命令的子进程（`--raw-ddc-write`），所以**每次通过 Intel 私有通道切换输入都会弹一次 UAC**。
+The Intel driver only lets elevated processes write to I²C. tarsier itself does not run as administrator; it launches a short-lived elevated child process (`--raw-ddc-write`) that sends that single command, so **every input switch over the Intel private channel raises a UAC prompt**.
 
-NVIDIA 的 NVAPI 没有这个限制，切换时不会弹窗。
+NVIDIA's NVAPI has no such restriction, so those switches are silent.
 
-## 输入值映射
+## Input value mapping
 
-MCCS 的输入值和 LG 私有的编号不是一套。内置映射表覆盖常见输入，`input_protocol` 里的 `values` 可以覆盖它：
+MCCS input values and LG's private numbering are two different scales. A built-in table covers the common inputs; `values` inside `input_protocol` overrides it:
 
 ```json
 { "input_protocol": { "kind": "lg", "values": { "16": 210 } } }
 ```
 
-键是十进制 MCCS 输入值（16 = DisplayPort），值是 LG 的编号。其余取值见 [ddcutil wiki](https://github.com/rockowitz/ddcutil/wiki/Switching-input-source-on-LG-monitors#theoretically-supported)。
+Keys are decimal MCCS input values (16 = DisplayPort), values are LG's numbers. The rest are listed on the [ddcutil wiki](https://github.com/rockowitz/ddcutil/wiki/Switching-input-source-on-LG-monitors#theoretically-supported).

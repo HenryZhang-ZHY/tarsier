@@ -1,42 +1,42 @@
 # tarsier
 
-[English](README.en.md) · **简体中文**
+**English** · [简体中文](README.zh.md)
 
-管理显示器和屏幕时间的 Windows 小工具，用 Rust + [GPUI](https://gpui.rs)（[gpui-kit](https://gpui-kit.com) 组件库）编写。灵感来自 Twinkle Tray 和 Fadetop。
+A small Windows utility for managing monitors and screen time, written in Rust with [GPUI](https://gpui.rs) (using the [gpui-kit](https://gpui-kit.com) component library). Inspired by Twinkle Tray and Fadetop.
 
-常驻托盘，自绘标题栏，支持亮 / 暗 / 跟随系统三种主题。
+It lives in the tray, draws its own title bar, and supports light, dark, and follow-system themes.
 
-## 功能
+## Features
 
-- **亮度 / 对比度**：通过 DDC/CI 直接调节外接显示器。
-- **一键切换输入源**：给每台显示器列出接着的电脑，按快捷键或点托盘菜单切过去。两台时是盲翻，三台起会先问你去哪台。不认标准命令的显示器（比如新款 LG）会自动改用厂商私有通道。
-- **休息提醒**：连续工作到设定时长后，像 Fadetop 一样在所有屏幕上淡入一层半透明遮罩；遮罩不抢焦点，鼠标点击直接穿过去。倒计时只在你真的离开键盘鼠标时才走。
-- **打分激励**：每段工作按时长打分，另有积分、称号和连续达标天数。
+- **Brightness / contrast**: adjust external monitors directly over DDC/CI.
+- **One-key input switching**: list the computers sharing each monitor and switch with a hotkey or the tray menu. Two computers flip blind; three or more ask which one first. Monitors that ignore the standard command (recent LGs, for instance) fall back to a vendor-private channel automatically.
+- **Break reminders**: after a stretch of work, a translucent overlay fades in across every screen, Fadetop-style. It never steals focus and clicks pass straight through. The countdown only runs while you are actually away from the keyboard and mouse.
+- **Scoring**: every work session is scored by length, with points, titles, and a streak of good days.
 
-## 安装
+## Install
 
-从 [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases) 下载 `tarsier.exe` 直接运行即可，无需安装。
+Download `tarsier.exe` from [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases) and run it. No installer needed.
 
-## 使用
+## Usage
 
-启动后驻留托盘，双击托盘图标打开主窗口。
+It stays in the tray; double-click the tray icon to open the main window.
 
-| 快捷键 | 作用 |
+| Hotkey | Action |
 | --- | --- |
-| `Ctrl+Alt+I` | 切换显示器输入。两台电脑时直接盲翻，三台以上弹出快切面板，按数字直达 |
-| `Ctrl+Alt+PageUp` / `PageDown` | 所有显示器亮度 ±10% |
+| `Ctrl+Alt+I` | Switch monitor input. Two computers: a blind flip. Three or more: a quick-switch panel, jump by number |
+| `Ctrl+Alt+PageUp` / `PageDown` | Brightness ±10% on every monitor |
 
-快捷键、休息时长等都在主窗口的「设置」页，或配置文件 `%APPDATA%\tarsier\config.json` 里调整。
+Hotkeys, break durations, and everything else live on the Settings tab of the main window, or in `%APPDATA%\tarsier\config.json`.
 
-## 文档
+## Documentation
 
-- [构建与运行](docs/building.md) — 从源码编译，命令行参数
-- [配置参考](docs/configuration.md) — `config.json` 全部字段
-- [厂商私有通道](docs/private-channels.md) — 为什么新款 LG 要绕道显卡驱动，以及 UAC 提权
-- [休息提醒与评分](docs/breaks.md) — 提醒规则、推迟、忽略、健康分怎么算
-- [开发者模式](docs/developer-mode.md) — DDC/CI 诊断和命令追踪
-- [已知限制](docs/limitations.md) — 什么情况调不了
+- [Building and running](docs/building.md) — build from source, command-line flags
+- [Configuration reference](docs/configuration.md) — every field in `config.json`
+- [Vendor-private channels](docs/private-channels.md) — why recent LGs need the GPU driver, and the UAC prompt
+- [Breaks and scoring](docs/breaks.md) — reminder rules, snooze, ignore, how the score is computed
+- [Developer mode](docs/developer-mode.md) — DDC/CI diagnostics and command tracing
+- [Known limitations](docs/limitations.md) — when a monitor can't be controlled
 
-## 许可
+## License
 
-MIT。图标来自 [Lucide](https://lucide.dev)（ISC）。
+MIT. Icons from [Lucide](https://lucide.dev) (ISC).
