@@ -407,6 +407,10 @@ impl Controller {
 
     pub fn switch_input(&mut self, monitor_id: &str, code: u8, cx: &mut Context<Self>) {
         let Some(entry) = self.monitors.iter_mut().find(|m| m.id() == monitor_id) else {
+            // Every caller passes a monitor id. A display *name* arriving here
+            // failed this lookup and returned silently, which made the whole
+            // tray menu look dead; say so rather than swallowing it.
+            log::warn!("switch_input: no monitor with id {monitor_id:?}");
             return;
         };
         let dev = entry.dev.clone();
@@ -910,7 +914,8 @@ impl Controller {
                     return None;
                 }
                 Some(tray::TrayGroup {
-                    monitor: m.dev.name.clone(),
+                    id: m.id().to_string(),
+                    name: m.dev.name.clone(),
                     endpoints: ports
                         .iter()
                         .map(|&port| tray::TrayEndpoint {

@@ -44,7 +44,12 @@ pub struct TrayEndpoint {
 /// setup does not merge into one ambiguous list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayGroup {
-    pub monitor: String,
+    /// The monitor's id. This is what routes a click back to a monitor, and it
+    /// is *not* the same string as [`Self::name`] — conflating the two made
+    /// every tray switch a silent no-op, because the lookup is by id.
+    pub id: String,
+    /// The monitor's name, shown only when more than one is listed.
+    pub name: String,
     pub endpoints: Vec<TrayEndpoint>,
 }
 
@@ -193,10 +198,10 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
             if state.groups.len() > 1 {
                 picker.append(&PredefinedMenuItem::separator())?;
                 // A disabled item is how the platform draws a section header.
-                picker.append(&MenuItem::new(group.monitor.clone(), false, None))?;
+                picker.append(&MenuItem::new(group.name.clone(), false, None))?;
             }
             for endpoint in &group.endpoints {
-                let id = MenuId::new(format!("go:{}:{}", group.monitor, endpoint.port));
+                let id = MenuId::new(format!("go:{}:{}", group.id, endpoint.port));
                 let label = format!(
                     "{}  ·  {}",
                     endpoint.name,
@@ -204,7 +209,7 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
                 );
                 let item = MenuItem::with_id(id.clone(), label, true, None);
                 picker.append(&item)?;
-                built.switches.push((id, group.monitor.clone(), endpoint.port));
+                built.switches.push((id, group.id.clone(), endpoint.port));
             }
         }
         menu.append(&picker)?;
@@ -331,6 +336,16 @@ mod tests {
         }
     }
 
+    /// A monitor id as Windows reports it — deliberately nothing like the
+    /// display name, so a test that confuses the two fails.
+    fn group(id: &str, name: &str, endpoints: Vec<TrayEndpoint>) -> TrayGroup {
+        TrayGroup {
+            id: id.to_string(),
+            name: name.to_string(),
+            endpoints,
+        }
+    }
+
     fn submenu_count(menu: &Menu) -> usize {
         menu.items()
             .into_iter()
@@ -341,10 +356,11 @@ mod tests {
     #[test]
     fn a_shared_monitor_lists_destinations_and_nothing_else() {
         let state = TrayState {
-            groups: vec![TrayGroup {
-                monitor: "27GP950".to_string(),
-                endpoints: vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
-            }],
+            groups: vec![group(
+                r"\\?\DISPLAY#GSM5BF6#5&1a2b3c4d&0&UID4353",
+                "27GP950",
+                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
+            )],
             tooltip: "tarsier".to_string(),
             ..Default::default()
         };
@@ -353,7 +369,6 @@ mod tests {
         // Every computer is reachable by name, and each is wired to a command
         // that names its own monitor and port.
         assert_eq!(built.switches.len(), 2);
-        assert_eq!(built.switches[0].1, "27GP950");
         assert_eq!(built.switches[0].2, 0x10);
         assert_eq!(built.switches[1].2, 0x12);
         // No "flip" entry: it would depend on the monitor's current input,
@@ -368,16 +383,39 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_routes_by_monitor_id_not_by_display_name() {
+        // `switch_input` looks a monitor up by id. Carrying the display name
+        // here instead made every tray switch fail its lookup and return
+        // silently — the menu looked dead and nothing said why.
+        let id = r"\\?\DISPLAY#GSM5BF6#5&1a2b3c4d&0&UID4353";
+        let state = TrayState {
+            groups: vec![group(
+                id,
+                "27GP950",
+                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
+            )],
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (_menu, built) = build_menu(&state).unwrap();
+        for (_, routed, _) in &built.switches {
+            assert_eq!(routed, id, "the click must carry the id, not the name");
+        }
+        assert_ne!(id, "27GP950");
+    }
+
+    #[test]
     fn three_computers_are_all_listed() {
         let state = TrayState {
-            groups: vec![TrayGroup {
-                monitor: "27GP950".to_string(),
-                endpoints: vec![
+            groups: vec![group(
+                "m1",
+                "27GP950",
+                vec![
                     endpoint(0x10, "MacBook Pro"),
                     endpoint(0x12, "台式机"),
                     endpoint(0x11, "游戏机"),
                 ],
-            }],
+            )],
             tooltip: "tarsier".to_string(),
             ..Default::default()
         };
@@ -402,14 +440,16 @@ mod tests {
     fn every_menu_id_is_unique_so_events_cannot_go_astray() {
         let state = TrayState {
             groups: vec![
-                TrayGroup {
-                    monitor: "A".to_string(),
-                    endpoints: vec![endpoint(0x11, "笔记本"), endpoint(0x12, "台式机")],
-                },
-                TrayGroup {
-                    monitor: "B".to_string(),
-                    endpoints: vec![endpoint(0x11, "游戏机"), endpoint(0x0F, "NAS")],
-                },
+                group(
+                    "monitor-a",
+                    "27GP950",
+                    vec![endpoint(0x11, "笔记本"), endpoint(0x12, "台式机")],
+                ),
+                group(
+                    "monitor-b",
+                    "U2723QE",
+                    vec![endpoint(0x11, "游戏机"), endpoint(0x0F, "NAS")],
+                ),
             ],
             tooltip: "tarsier".to_string(),
             ..Default::default()
