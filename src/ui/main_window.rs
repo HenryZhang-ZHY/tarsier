@@ -130,6 +130,20 @@ fn endpoint_color(index: usize) -> Hsla {
     hsla(HUES[index % HUES.len()], 0.72, 0.55, 1.0)
 }
 
+/// A small pill: "本机" on the computer you are sitting at, "正在显示" on the
+/// one the monitor is showing right now.
+fn mark(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
+    div()
+        .px_2()
+        .rounded_md()
+        .border_1()
+        .border_color(border)
+        .bg(bg)
+        .text_xs()
+        .text_color(fg)
+        .child(text.to_string())
+}
+
 /// A hotkey spec like `ctrl+alt+I` drawn as key caps.
 fn hotkey_caps(spec: &str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
@@ -516,25 +530,196 @@ impl MainWindow {
             .when(c.config.developer_mode, |el| el.child(render_diagnostics(m, cx)))
     }
 
-    /// The input-switching block. Until a monitor has been through setup this
-    /// is the wizard; afterwards it is the list of computers sharing it.
+    /// The input-switching block on the Monitors tab.
+    ///
+    /// This page is for looking and acting: it says which computer the monitor
+    /// is showing and offers the switch. Everything editable — names, ports,
+    /// adding and removing computers — lives on the Settings tab, where the
+    /// rest of the configuration already is. Moving all of it would leave this
+    /// page with no way to switch at all, which is why the two halves split
+    /// rather than move.
     fn render_switching(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
         let id = m.id().to_string();
-        let inputs = c.inputs_for(m);
-        if let Some(setup) = self.setup.get(&id)
-            && (setup.naming || !c.endpoints_configured(m))
-        {
-            return self.render_wizard(idx, m, setup, &inputs, cx);
-        }
+        let hotkey = c.config.hotkeys.toggle_input.clone();
         let endpoints = c.endpoints(m);
+
+        let header = h_flex()
+            .gap_2()
+            .items_center()
+            .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(if endpoints.len() == 2 {
+                        "一键切换"
+                    } else {
+                        "输入切换"
+                    }),
+            )
+            .child(div().flex_1())
+            .child(hotkey_caps(&hotkey, cx));
+
+        // Nothing to offer at all: this is the one case that needs setup before
+        // it can do anything, so it is the one case that sends you to Settings.
         if endpoints.is_empty() {
-            return div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("这台显示器没有上报输入列表，先在配置文件的 extra_inputs 里补上接口。")
+            return v_flex()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(theme.muted)
+                .child(header)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("还没设置共用这台显示器的电脑。"),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("configure-{idx}")))
+                        .small()
+                        .outline()
+                        .label("去设置里配置")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tab = Tab::Settings;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element();
         }
-        self.render_roster(idx, m, c, &endpoints, &inputs, cx)
+
+        let local = c.local_input(m);
+        let current = m.current_input;
+        let n = endpoints.len();
+        let label = |port: u8| c.monitor_prefs(&id).label(port);
+
+        let rows = endpoints.iter().enumerate().map(|(ix, &port)| {
+            let active = current == Some(port);
+            let here = local == Some(port);
+            h_flex()
+                .gap_2()
+                .items_center()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                // The box behind this row is `muted`, so the highlight has to
+                // come back to `background` to be visible at all.
+                .when(active, |el| el.bg(theme.background))
+                .children((n >= 3).then(|| {
+                    div()
+                        .w(px(16.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("{}", ix + 1))
+                }))
+                .child(
+                    div()
+                        .size(px(9.))
+                        .rounded_full()
+                        .bg(if here { theme.success } else { endpoint_color(ix) }),
+                )
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label(port)))
+                .when(here, |el| {
+                    el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
+                })
+                .when(active, |el| {
+                    el.child(mark("正在显示", theme.success, theme.background, theme.border))
+                })
+                .child(div().flex_1())
+                .when(!active, |el| {
+                    let id = id.clone();
+                    el.child(
+                        Button::new(SharedString::from(format!("go-{idx}-{ix}")))
+                            .xsmall()
+                            .ghost()
+                            .label("切到这里")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
+                            })),
+                    )
+                })
+        });
+
+        // The one action worth a big button is the one that always works; with
+        // three or more endpoints the hotkey has to ask, so the button does too.
+        let target = current.and_then(|cur| endpoints.iter().copied().find(|p| *p != cur));
+        let action: AnyElement = match (n, target) {
+            (2, Some(port)) => {
+                let id = id.clone();
+                Button::new(SharedString::from(format!("switch-{idx}")))
+                    .primary()
+                    .label(format!("切换到 {}", label(port)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
+                    }))
+                    .into_any_element()
+            }
+            (2, None) => div().into_any_element(),
+            _ => Button::new(SharedString::from(format!("switch-{idx}")))
+                .primary()
+                .label("切换…")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.controller.update(cx, |c, cx| c.open_switch_hud(cx));
+                }))
+                .into_any_element(),
+        };
+
+        let hint = if current.is_none() {
+            "这台显示器不上报当前输入，所以按钮不替你猜目的地 —— 点某一行的「切到这里」就行。".to_string()
+        } else if n == 2 {
+            format!(
+                "按快捷键直接切到 {}，再按一次切回来。",
+                label(target.unwrap_or(endpoints[0]))
+            )
+        } else {
+            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。".to_string()
+        };
+
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(theme.muted)
+            .child(header)
+            .children(rows)
+            .child(action)
+            .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
+            // A monitor that reports exactly two inputs works with no setup at
+            // all, but the rows are then named after the ports rather than the
+            // computers, so nudge towards naming them without blocking on it.
+            .when(!c.endpoints_configured(m), |el| {
+                el.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child("这些接口还没有名字。"),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("name-{idx}")))
+                                .xsmall()
+                                .ghost()
+                                .label("去设置里起名")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.tab = Tab::Settings;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .when(!m.inputs_reported(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。"),
+                )
+            })
+            .into_any_element()
     }
 
     // ---- first-run wizard --------------------------------------------------
@@ -835,9 +1020,16 @@ impl MainWindow {
             .into_any_element()
     }
 
-    // ---- configured endpoint list ------------------------------------------
+    // ---- endpoint editor (Settings tab) ------------------------------------
 
-    fn render_roster(
+    /// The editable form for one monitor's computers.
+    ///
+    /// It lives on the Settings tab, where the rest of the configuration is.
+    /// The Monitors tab renders the same list read-only, for looking and
+    /// switching. The two share the data and the colours but not the markup:
+    /// almost every cell differs, a text field against a label, a port chooser
+    /// against a port name.
+    fn render_endpoint_editor(
         &self,
         idx: usize,
         m: &MonitorEntry,
@@ -885,7 +1077,10 @@ impl MainWindow {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .when(active, |el| el.bg(theme.muted))
+                        // The box behind this row is `muted`, so the
+                        // highlight has to come back to `background` to show
+                        // at all.
+                        .when(active, |el| el.bg(theme.background))
                         .children((n >= 3).then(|| {
                             div()
                                 .w(px(16.))
@@ -916,41 +1111,12 @@ impl MainWindow {
                         })
                         .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
                         .when(here, |el| {
-                            el.child(
-                                div()
-                                    .px_2()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("本机"),
-                            )
+                            el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
                         })
                         .when(active, |el| {
-                            el.child(
-                                div()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .text_color(theme.success)
-                                    .child("正在显示"),
-                            )
+                            el.child(mark("正在显示", theme.success, theme.background, theme.border))
                         })
                         .child(div().flex_1())
-                        .when(!active, |el| {
-                            let id = id.clone();
-                            el.child(
-                                Button::new(SharedString::from(format!("go-{idx}-{ix}")))
-                                    .xsmall()
-                                    .ghost()
-                                    .label("切到这里")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.port_picker = None;
-                                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
-                                    })),
-                            )
-                        })
                         .child({
                             let key = key.clone();
                             Button::new(SharedString::from(format!("port-{idx}-{ix}")))
@@ -978,62 +1144,11 @@ impl MainWindow {
                 .children(strip)
         });
 
-        // The one action worth a big button is the one that always works; with
-        // three or more endpoints the hotkey has to ask, so the button does too.
-        let label = |port: u8| c.monitor_prefs(&id).label(port);
-        let target = current.and_then(|cur| endpoints.iter().copied().find(|p| *p != cur));
-        let action: AnyElement = match (n, target) {
-            (2, Some(port)) => {
-                let id = id.clone();
-                Button::new(SharedString::from(format!("switch-{idx}")))
-                    .primary()
-                    .label(format!("切换到 {}", label(port)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.port_picker = None;
-                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
-                    }))
-                    .into_any_element()
-            }
-            (2, None) => div().into_any_element(),
-            _ => Button::new(SharedString::from(format!("switch-{idx}")))
-                .primary()
-                .label("切换…")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.controller.update(cx, |c, cx| c.open_switch_hud(cx));
-                }))
-                .into_any_element(),
-        };
-
-        let hotkey = c.config.hotkeys.toggle_input.clone();
-        let hint = if current.is_none() {
-            "这台显示器不上报当前输入，所以按钮不替你猜目的地 —— 点某一行的「切到这里」就行。".to_string()
-        } else if n == 2 {
-            format!(
-                "按快捷键直接切到 {}，再按一次切回来。",
-                label(target.unwrap_or(endpoints[0]))
-            )
-        } else {
-            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。".to_string()
-        };
-
         v_flex()
             .gap_2()
             .p_3()
             .rounded_md()
             .bg(theme.muted)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if n == 2 {
-                        "一键切换"
-                    } else {
-                        "输入切换"
-                    }))
-                    .child(div().flex_1())
-                    .child(hotkey_caps(&hotkey, cx)),
-            )
             .children(rows)
             .child({
                 let id = id.clone();
@@ -1049,8 +1164,6 @@ impl MainWindow {
                         }
                     }))
             })
-            .child(action)
-            .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
             .when(!m.inputs_reported(), |el| {
                 el.child(
                     div()
@@ -1059,6 +1172,43 @@ impl MainWindow {
                         .child("显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。"),
                 )
             })
+            .into_any_element()
+    }
+
+    /// One monitor's block in the Settings tab's input card: the first-run
+    /// wizard while it has not been through setup, the editable list after.
+    fn render_input_settings(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let id = m.id().to_string();
+        let inputs = c.inputs_for(m);
+
+        let body: AnyElement = match self.setup.get(&id) {
+            // `naming` is checked as well so an import landing mid-wizard
+            // takes effect on this paint rather than the next one.
+            Some(setup) if setup.naming || !c.endpoints_configured(m) => self.render_wizard(idx, m, setup, &inputs, cx),
+            _ => {
+                let endpoints = c.endpoints(m);
+                if endpoints.is_empty() {
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("这台显示器没有上报输入列表，先在配置文件的 extra_inputs 里补上接口。")
+                        .into_any_element()
+                } else {
+                    self.render_endpoint_editor(idx, m, c, &endpoints, &inputs, cx)
+                }
+            }
+        };
+
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(m.dev.name.clone()),
+            )
+            .child(body)
             .into_any_element()
     }
 
@@ -1444,8 +1594,26 @@ impl MainWindow {
             let export = self.controller.clone();
             let import = self.controller.clone();
             card(cx)
-                .gap_2()
-                .child(section_label("输入切换设置", cx))
+                .gap_4()
+                .child(section_label("显示器输入", cx))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    "给每台显示器列出共用它的电脑并起好名字 —— 名字是唯一能让你一眼认出谁是谁的东西。点左端圆点标记你正坐着的那台，只影响显示，不影响切换。",
+                ))
+                .when(c.monitors.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("还没有检测到支持 DDC/CI 的外接显示器。"),
+                    )
+                })
+                .children(
+                    c.monitors
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, m)| self.render_input_settings(idx, m, c, cx)),
+                )
+                .child(div().h(px(1.)).bg(theme.border))
                 .child(div().text_xs().text_color(theme.muted_foreground).child(
                     "「接口 → 电脑名」跟着显示器走，所以在哪台电脑上填都一样。在一台上填好，把它搬到其余几台，就不用再填一遍。",
                 ))
@@ -1462,8 +1630,7 @@ impl MainWindow {
                                     let text = export.read(cx).export_switching();
                                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                                     export.update(cx, |c, cx| {
-                                        c.notice =
-                                            Some("已复制。在另一台电脑上点「导入设置」。".into());
+                                        c.notice = Some("已复制。在另一台电脑上点「导入设置」。".into());
                                         cx.notify();
                                     });
                                 }),
