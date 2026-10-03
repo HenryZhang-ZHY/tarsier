@@ -1,9 +1,12 @@
 //! Break tracking state machine (Fadetop-style), driven once per second by
 //! the caller with "seconds since last keyboard/mouse input". Pure logic.
 //!
-//! - Seconds with recent input count towards the current *work session*.
-//! - Staying away for `break_secs` (lunch, meeting, screen locked, sleep)
-//!   ends the session as a natural break, no reminder needed.
+//! - Work time is mechanical: every second of a session counts, whether or not
+//!   there was input (reading or thinking still strains the eyes).
+//! - Only sleep/hibernation (a tick gap of `break_secs`) ends a session as a
+//!   natural break. Being idle or locked does not: the timer keeps running and
+//!   the reminder finishes by itself once the user has been hands-off long
+//!   enough.
 //! - Once a session reaches `work_secs` of activity a break is prompted. The
 //!   prompted break only counts down while the user is actually hands-off,
 //!   so wiggling the mouse does not "complete" a break.
@@ -13,8 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Input within this many seconds means the user is working.
-pub const ACTIVE_IDLE_THRESHOLD: u64 = 60;
+/// Back from a break once input is this recent.
+const RETURN_IDLE: u64 = 60;
 /// During a prompted break, idle at least this long counts as resting.
 pub const RESTING_IDLE: u64 = 3;
 /// Larger tick gaps are treated as time away (sleep, hibernation, hang).
@@ -79,7 +82,6 @@ pub struct BreakTracker {
     session_start: i64,
     session_active: u64,
     next_prompt_at: u64,
-    last_idle: u64,
 }
 
 impl BreakTracker {
@@ -90,7 +92,6 @@ impl BreakTracker {
             session_start: now,
             session_active: 0,
             next_prompt_at: settings.work_secs,
-            last_idle: 0,
         }
     }
 
@@ -137,15 +138,10 @@ impl BreakTracker {
         let (dt, idle) = if dt > MAX_TICK { (dt, idle.max(dt)) } else { (dt, idle) };
         match self.phase {
             Phase::Working => {
-                if idle >= self.settings.break_secs {
-                    // Seconds right after the last input were counted as work; give them back.
-                    let counted_idle = self.last_idle.min(ACTIVE_IDLE_THRESHOLD - 1);
-                    self.session_active = self.session_active.saturating_sub(counted_idle);
-                    self.end_session(now - idle as i64, BreakKind::Natural, &mut events);
+                if dt > MAX_TICK && dt >= self.settings.break_secs {
+                    self.end_session(now - dt as i64, BreakKind::Natural, &mut events);
                 } else {
-                    if idle < ACTIVE_IDLE_THRESHOLD {
-                        self.session_active += dt.min(MAX_TICK);
-                    }
+                    self.session_active += dt.min(MAX_TICK);
                     if self.session_active >= self.next_prompt_at && !suppressed {
                         self.phase = Phase::Prompted { rested: 0, elapsed: 0 };
                         events.push(BreakEvent::PromptBreak);
@@ -155,8 +151,8 @@ impl BreakTracker {
             Phase::Prompted { rested, elapsed } => {
                 let rested = if idle >= RESTING_IDLE { rested + dt } else { rested };
                 let elapsed = elapsed + dt;
-                if idle < ACTIVE_IDLE_THRESHOLD && idle < RESTING_IDLE {
-                    // The overlay doesn't block input, so typing through it is work.
+                if idle < RESTING_IDLE {
+                    // The overlay doesn't block input, so working through it is work.
                     self.session_active += dt.min(MAX_TICK);
                 }
                 if rested >= self.settings.break_secs || idle >= self.settings.break_secs {
@@ -171,13 +167,12 @@ impl BreakTracker {
                 }
             }
             Phase::Away => {
-                if idle < self.settings.break_secs.min(ACTIVE_IDLE_THRESHOLD) {
+                if idle < self.settings.break_secs.min(RETURN_IDLE) {
                     self.start_session(now - idle as i64);
                     events.push(BreakEvent::Returned);
                 }
             }
         }
-        self.last_idle = idle;
         events
     }
 
@@ -291,31 +286,35 @@ mod tests {
     }
 
     #[test]
-    fn idle_between_threshold_and_break_does_not_count_as_work() {
+    fn short_idle_still_counts_as_work() {
         let mut now = 0;
         let mut t = BreakTracker::new(SETTINGS, now);
+        // Reading without touching input for 100s (< break_secs) is still work.
         run(&mut t, &mut now, 100, |i| i, false);
-        assert_eq!(t.session_active(), ACTIVE_IDLE_THRESHOLD);
+        assert_eq!(t.session_active(), 100);
         assert_eq!(t.phase(), Phase::Working);
     }
 
     #[test]
-    fn walking_away_is_a_natural_break() {
+    fn long_idle_is_not_a_break() {
         let mut now = 0;
         let mut t = BreakTracker::new(SETTINGS, now);
-        run(&mut t, &mut now, 300, |_| 0, false);
-        let ev = run(&mut t, &mut now, 120, |i| i + 1, false);
-        let s = sessions(&ev);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].kind, BreakKind::Natural);
-        assert_eq!(s[0].end, 300);
-        assert_eq!(s[0].active_secs, 300);
-        assert_eq!(t.phase(), Phase::Away);
+        run(&mut t, &mut now, 500, |i| i, false);
+        assert_eq!(t.phase(), Phase::Working);
+        assert_eq!(t.session_active(), 500);
+    }
 
-        let ev = run(&mut t, &mut now, 1, |_| 0, false);
-        assert_eq!(ev, vec![BreakEvent::Returned]);
-        assert_eq!(t.session_active(), 0);
-        assert_eq!(t.until_prompt(), 600);
+    #[test]
+    fn leaving_unlocked_prompts_then_finishes_the_break() {
+        let mut now = 0;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        run(&mut t, &mut now, 500, |_| 0, false);
+        // Away from the desk: the timer keeps running, the prompt fires...
+        let ev = run(&mut t, &mut now, 200, |i| 1000 + i, false);
+        assert!(ev.contains(&BreakEvent::PromptBreak));
+        // ...and the break completes on its own since the user is hands-off.
+        assert!(ev.contains(&BreakEvent::BreakFinished));
+        assert_eq!(t.phase(), Phase::Away);
     }
 
     #[test]

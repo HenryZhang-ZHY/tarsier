@@ -4,9 +4,9 @@
 
 ## Reminders
 
-After `work_minutes` of continuous work, tarsier fades a translucent overlay in across every screen, Fadetop-style. It never steals focus and mouse clicks pass straight through, so you can finish what you're doing first.
+**Work time is a plain timer**: every second since your last break counts, with or without keyboard/mouse input (deep reading still strains your eyes). After `work_minutes` of work, tarsier fades a translucent overlay in across every screen, Fadetop-style. It never steals focus and mouse clicks pass straight through, so you can finish what you're doing first.
 
-**The countdown only runs while you are genuinely idle** — jiggling the mouse doesn't count as a break; you have to actually leave the keyboard and mouse. Being away longer than `break_minutes` (lunch, a meeting, locking the screen, sleeping) is recorded as a break automatically, with no button to press.
+**The countdown only runs while you are genuinely idle** — jiggling the mouse doesn't count as a break; you have to actually leave the keyboard and mouse. Leaving the keyboard and mouse alone is not treated as leaving — the timer keeps running. Sleeping for longer than `break_minutes` is recorded as a break automatically. If you step away, the reminder still appears and completes by itself once you have been hands-off long enough.
 
 To snooze or skip, use the tray menu or the Breaks tab of the main window.
 
