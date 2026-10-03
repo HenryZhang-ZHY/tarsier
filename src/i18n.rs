@@ -13,6 +13,13 @@
 //! Names the user typed (monitor input names, computer names) and what the
 //! hardware reports ("DisplayPort 2", "HDMI 1") are data, not copy, and are
 //! never translated.
+//!
+//! Strings the component library owns are not in these tables either. It keeps
+//! its own translations — English, Simplified and Traditional Chinese, Italian
+//! — in `rust-i18n` locale files and reads them through its own `set_locale`,
+//! which [`set_language`] drives, so a single switch moves the whole window.
+//! Those are the strings we cannot write ourselves: the cut/copy/paste menu a
+//! text field opens, for instance.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -41,6 +48,16 @@ impl Language {
             Self::Zh => "中文",
         }
     }
+
+    /// What this language is called in the component library's locale files.
+    /// It has a vocabulary of its own — the Chinese one is "zh-CN", not "zh" —
+    /// and a key that names no file falls back to English in silence.
+    pub fn locale(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Zh => "zh-CN",
+        }
+    }
 }
 
 /// The language every window draws in. Written once from the saved config at
@@ -49,8 +66,15 @@ impl Language {
 /// a language explicitly through [`tr_in`].
 static CURRENT: AtomicU8 = AtomicU8::new(Language::En as u8);
 
+/// Switches the whole program over, wherever the strings come from.
+///
+/// Ours are looked up at draw time, so nothing has to be told about the change
+/// beyond a repaint. The component library keeps its own strings in `rust-i18n`
+/// locale files and has to be told separately; every caller comes through here,
+/// which is what keeps the two from drifting apart.
 pub fn set_language(language: Language) {
     CURRENT.store(language as u8, Ordering::Relaxed);
+    gpui_kit::component::set_locale(language.locale());
 }
 
 pub fn language() -> Language {
@@ -615,6 +639,21 @@ mod tests {
         assert_eq!(serde_json::to_string(&Language::En).unwrap(), "\"en\"");
         assert_eq!(serde_json::to_string(&Language::Zh).unwrap(), "\"zh\"");
         assert_eq!(serde_json::from_str::<Language>("\"zh\"").unwrap(), Language::Zh);
+    }
+
+    /// The component library has strings of its own — the cut/copy/paste menu a
+    /// text field opens — and a locale of its own, spelled differently from
+    /// ours. A switch that only moved our tables would leave those in English.
+    ///
+    /// It is a process global, so this test puts it back, and it deliberately
+    /// drives the library directly rather than through [`set_language`]: that
+    /// one flips our own global too, and the rest of the suite reads it.
+    #[test]
+    fn the_language_reaches_the_component_library_too() {
+        gpui_kit::component::set_locale(Language::Zh.locale());
+        assert_eq!(&*gpui_kit::component::locale(), "zh-CN");
+        gpui_kit::component::set_locale(Language::En.locale());
+        assert_eq!(&*gpui_kit::component::locale(), "en");
     }
 
     /// Every `.rs` file under `src/` except this one, concatenated.
