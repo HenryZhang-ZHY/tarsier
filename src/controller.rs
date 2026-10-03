@@ -887,14 +887,28 @@ impl Controller {
         if handles.is_empty() && return_to.is_none() {
             return;
         }
-        for handle in handles {
-            handle.update(cx, |_, window, _| window.remove_window()).ok();
-        }
-        // Changing your mind about the switch should not leave your application
-        // stranded in the background, so the round trip is invisible.
-        if let Some(hwnd) = return_to {
-            platform::restore_foreground(hwnd);
-        }
+        // The removal cannot happen here. Every ordinary way of closing the
+        // panel — Esc, a number key, clicking a row, clicking outside — runs
+        // inside one of these very windows: input reaches a listener through
+        // `WindowHandle::update`, which takes the window off the app for the
+        // duration. A second `update` on that window therefore fails with
+        // "window not found" instead of closing it, and swallowing that error
+        // is what left the panel parked on screen. Deferred to the end of the
+        // effect cycle, every window is back on the app and the handles work.
+        cx.defer(move |cx| {
+            for handle in handles {
+                if let Err(e) = handle.update(cx, |_, window, _| window.remove_window()) {
+                    log::warn!("failed to close the switch panel: {e}");
+                }
+            }
+            // Changing your mind about the switch should not leave your
+            // application stranded in the background, so the round trip is
+            // invisible. After the panel is gone, or Windows may hand focus
+            // back to a window that is still there.
+            if let Some(hwnd) = return_to {
+                platform::restore_foreground(hwnd);
+            }
+        });
     }
 
     /// What the tray menu should show right now. Compared by value on the tray
