@@ -184,14 +184,10 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
             Command::ShowWindow,
         )?;
     } else {
-        // The top entry is the hotkey's action, worded as an action: the flip
-        // reads the monitor itself, so this item never has to know where the
-        // monitor currently is.
-        push_item(&menu, &mut built, "switch", "⇄ 切换显示器输入", Command::ToggleInput)?;
-
-        // One level down, every destination by name. Plain items rather than
-        // check marks: a tick would need the current input, and a stale tick
-        // is worse than none.
+        // Only destinations. There is deliberately no "flip" entry above them:
+        // a flip has to read the monitor to know which way to go, and when that
+        // reading is missing or lands outside the pair the entry can only do
+        // nothing. The hotkey still flips, and asks when it cannot.
         let picker = Submenu::new("切换到", true);
         for group in &state.groups {
             if state.groups.len() > 1 {
@@ -343,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_monitor_gets_an_action_plus_a_named_submenu() {
+    fn a_shared_monitor_lists_destinations_and_nothing_else() {
         let state = TrayState {
             groups: vec![TrayGroup {
                 monitor: "27GP950".to_string(),
@@ -360,8 +356,12 @@ mod tests {
         assert_eq!(built.switches[0].1, "27GP950");
         assert_eq!(built.switches[0].2, 0x10);
         assert_eq!(built.switches[1].2, 0x12);
-        // The top entry flips; the submenu picks explicitly.
-        assert!(built.commands.iter().any(|(_, c)| *c == Command::ToggleInput));
+        // No "flip" entry: it would depend on the monitor's current input,
+        // which is the thing this menu deliberately does not consult.
+        assert!(
+            !built.commands.iter().any(|(_, c)| *c == Command::ToggleInput),
+            "the menu should offer destinations, not a state-dependent flip"
+        );
         // The list is nested, so the everyday menu does not grow with the
         // number of computers sharing the monitor.
         assert_eq!(submenu_count(&menu), 1);

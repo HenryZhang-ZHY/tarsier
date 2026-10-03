@@ -100,15 +100,9 @@ fn main() {
 fn run_command(controller: &Entity<Controller>, command: Command, cx: &mut App) {
     match command {
         Command::ShowWindow => controller.update(cx, |c, cx| c.show_main_window(cx)),
-        // Two computers can be flipped blind; three or more cannot, so the
-        // hotkey has to ask which one instead of guessing.
-        Command::ToggleInput => controller.update(cx, |c, cx| {
-            if c.needs_picker() {
-                c.open_switch_hud(cx);
-            } else {
-                c.toggle_inputs(cx);
-            }
-        }),
+        // Flips a two-computer monitor, and opens the chooser when flipping is
+        // not a question with one answer.
+        Command::ToggleInput => controller.update(cx, |c, cx| c.toggle_inputs(cx)),
         Command::SwitchTo(monitor, port) => controller.update(cx, |c, cx| c.switch_input(&monitor, port, cx)),
         Command::BrightnessUp => controller.update(cx, |c, cx| c.nudge_brightness(true, cx)),
         Command::BrightnessDown => controller.update(cx, |c, cx| c.nudge_brightness(false, cx)),

@@ -73,13 +73,18 @@ pub fn now_ts() -> i64 {
     Local::now().timestamp()
 }
 
-/// Where a blind flip lands: the other endpoint when the monitor is showing
-/// the first, and the first otherwise.
+/// Where a blind flip lands, or `None` when the monitor is not on either
+/// endpoint — it is showing a third device, or the reading cannot be trusted.
 ///
-/// An input outside the pair — a third device, or a value the monitor reports
-/// oddly — also lands on the first.
-pub fn flip_destination(pair: [u8; 2], current: Option<u8>) -> u8 {
-    if current == Some(pair[0]) { pair[1] } else { pair[0] }
+/// Guessing in that case would send the monitor somewhere the user did not ask
+/// for, and guessing from a remembered value would make the flip get stuck on
+/// one side. So the caller asks instead.
+pub fn flip_destination(pair: [u8; 2], current: Option<u8>) -> Option<u8> {
+    match current {
+        Some(port) if port == pair[0] => Some(pair[1]),
+        Some(port) if port == pair[1] => Some(pair[0]),
+        _ => None,
+    }
 }
 
 pub fn local_date(ts: i64) -> NaiveDate {
@@ -425,35 +430,69 @@ impl Controller {
         .detach();
     }
 
-    /// Flip every monitor that is shared by exactly two computers to the other
-    /// one. Monitors with three or more are skipped: flipping is only
-    /// unambiguous when there is a single other side to flip to.
+    /// The switch hotkey: flip a two-computer monitor to its other side, or ask
+    /// when flipping is not a question with one answer.
+    ///
+    /// Asking covers two cases that used to do nothing at all: a monitor with
+    /// three or more computers has no single "other one", and a monitor whose
+    /// current input cannot be read — or reads as something outside the pair —
+    /// has no knowable direction to flip in.
     pub fn toggle_inputs(&mut self, cx: &mut Context<Self>) {
-        let jobs: Vec<(Arc<display::Monitor>, [u8; 2], Option<u8>)> = self
+        if self.needs_picker() {
+            self.open_switch_hud(cx);
+            return;
+        }
+        let jobs: Vec<(Arc<display::Monitor>, [u8; 2])> = self
             .monitors
             .iter()
             .filter_map(|m| {
                 let ports = self.endpoints(m);
-                (ports.len() == 2).then(|| (m.dev.clone(), [ports[0], ports[1]], m.current_input))
+                (ports.len() == 2).then(|| (m.dev.clone(), [ports[0], ports[1]]))
             })
             .collect();
         if jobs.is_empty() {
-            self.notice = Some("还没有设置要切换的电脑，请在「显示器」页添加".into());
+            self.notice = Some("还没有设置要切换的电脑，请在「设置」页添加".into());
             cx.notify();
             self.show_main_window(cx);
             return;
         }
         cx.spawn(async move |this, cx| {
-            let results = cx
+            // Read before writing: whether a flip is even possible depends on
+            // where the monitor is, so it is decided here rather than guessed.
+            let reads = cx
                 .background_executor()
                 .spawn(async move {
                     jobs.into_iter()
-                        .map(|(dev, [a, b], cached)| {
-                            // Read fresh: the monitor's own buttons may have changed it.
-                            let current = dev.current_input().or(cached);
-                            let target = flip_destination([a, b], current);
-                            (dev.id.clone(), target, dev.switch_input(target))
+                        .map(|(dev, pair)| {
+                            let current = dev.current_input();
+                            (dev, pair, current)
                         })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let targets = reads
+                .iter()
+                .map(|(_, pair, current)| flip_destination(*pair, *current))
+                .collect::<Option<Vec<u8>>>();
+            let Some(targets) = targets else {
+                this.update(cx, |this, cx| {
+                    this.notice = Some("读不出显示器现在在哪一路，没法盲翻 —— 在快切面板里选一台。".into());
+                    this.open_switch_hud(cx);
+                })
+                .ok();
+                return;
+            };
+            let writes = reads
+                .into_iter()
+                .zip(targets)
+                .map(|((dev, _, _), target)| (dev, target))
+                .collect::<Vec<_>>();
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    writes
+                        .into_iter()
+                        .map(|(dev, target)| (dev.id.clone(), target, dev.switch_input(target)))
                         .collect::<Vec<_>>()
                 })
                 .await;
@@ -932,16 +971,15 @@ mod tests {
     use super::flip_destination;
 
     #[test]
-    fn the_flip_only_needs_the_pair_and_where_the_monitor_is() {
+    fn a_flip_refuses_to_guess_when_it_cannot_tell_which_way_to_go() {
         let pair = [0x10, 0x12];
-        assert_eq!(flip_destination(pair, Some(0x10)), 0x12);
-        assert_eq!(flip_destination(pair, Some(0x12)), 0x10);
-        // An input outside the pair, or nothing readable at all, lands on the
-        // first. The hotkey reads the monitor fresh at the moment it runs, so
-        // this is the only place the current input is consulted — everything
-        // the user looks at names a destination, never a state.
-        assert_eq!(flip_destination(pair, Some(0x0F)), 0x10);
-        assert_eq!(flip_destination(pair, None), 0x10);
+        assert_eq!(flip_destination(pair, Some(0x10)), Some(0x12));
+        assert_eq!(flip_destination(pair, Some(0x12)), Some(0x10));
+        // A third device, or a reading the monitor will not give: guessing here
+        // used to send the monitor to the same endpoint it was already on, so
+        // the hotkey appeared to do nothing. The caller asks instead.
+        assert_eq!(flip_destination(pair, Some(0x0F)), None);
+        assert_eq!(flip_destination(pair, None), None);
     }
 }
 
