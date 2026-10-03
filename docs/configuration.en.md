@@ -59,25 +59,43 @@ When `respect_fullscreen` is true, reminders are held while a fullscreen game, v
 
 The key is the monitor id, which the diagnostics panel on the Monitors tab shows. Every field is optional.
 
-### `toggle`
+### `endpoints`
 
-The two inputs the hotkey flips between, as decimal VCP values:
+The computers sharing this monitor, in order, as decimal VCP values:
 
 ```json
-{ "monitors": { "DEL41A3": { "toggle": [15, 17] } } }
+{ "monitors": { "DEL41A3": { "endpoints": [16, 18, 17] } } }
 ```
 
 15 = DisplayPort 1, 17 = HDMI 1. Which value maps to which physical port follows the monitor's own reporting and differs between models.
 
+**The order matters**: with three or more computers it is both the number key in the quick-switch panel and the index shown at the start of each row.
+
+With two, the hotkey is a blind flip — it reads the monitor's current input and switches to the other one — so their order is irrelevant. From three upwards the hotkey opens the quick-switch panel and jumps straight to the chosen port. It deliberately does not cycle: most monitors stop answering this machine's DDC/CI once they are showing a different input, so the second hop would often never arrive.
+
+> Older versions described the same thing as `toggle: [15, 17]`. It is upgraded to `endpoints` on load, and `input_names` is kept as is.
+
+### `local_input`
+
+Which port **this** computer is plugged into. Display only — it decides which row is marked "this computer" and never influences where a switch goes, because switching always reads the monitor's own reported input.
+
+```json
+{ "local_input": 16 }
+```
+
+Leave it out and everything still works; the main window and quick-switch panel just will not show which side you are on.
+
 ### `input_names`
 
-Custom labels, keyed by decimal VCP value:
+What each computer is called, keyed by decimal VCP value:
 
 ```json
 { "input_names": { "15": "Desktop", "17": "Laptop" } }
 ```
 
-The labels appear on the Monitors tab and in the tray menu.
+The names appear in the main window, the tray menu and the quick-switch panel. They are the only thing that makes "which one is which" answerable, and they replace the old A / B letters. The port-to-name mapping is absolute — DisplayPort 2 means the same machine on every computer — so one set of names holds everywhere.
+
+Edit them directly in the main window; there is no need to hand-write JSON.
 
 ### `extra_inputs`
 
@@ -117,8 +135,9 @@ Background: [Vendor-private channels](private-channels.en.md).
   },
   "monitors": {
     "DEL41A3": {
-      "toggle": [15, 17],
-      "input_names": { "15": "Desktop", "17": "Laptop" },
+      "endpoints": [16, 18, 17],
+      "local_input": 16,
+      "input_names": { "16": "Laptop", "17": "Desktop", "18": "Console" },
       "extra_inputs": [27]
     }
   }

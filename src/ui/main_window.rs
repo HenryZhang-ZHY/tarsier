@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use chrono::{Days, Local, TimeZone};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::*;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
@@ -17,8 +18,9 @@ use gpui_kit::*;
 use crate::breaks::{BreakKind, Phase};
 use crate::config;
 use crate::controller::{Controller, MonitorEntry, local_date, now_ts};
-use crate::display::mccs::{VCP_BRIGHTNESS, VCP_CONTRAST};
+use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
+use crate::platform;
 use crate::stats::{self, GOOD_SCORE};
 use crate::ui::format_minutes;
 use crate::ui::number_field::{NumberField, Range};
@@ -97,7 +99,66 @@ pub struct MainWindow {
     sliders: HashMap<(String, u8), Entity<SliderState>>,
     /// Typed value fields: brightness/contrast keyed `"{monitor}#{code}"`, break durations by name.
     numbers: HashMap<String, NumberField>,
+    /// Editable computer names for each endpoint, keyed `endpoint_key`.
+    names: HashMap<String, Entity<InputState>>,
+    /// The endpoint whose port chooser is expanded, if any. One at a time
+    /// keeps the card from turning back into a wall of buttons.
+    port_picker: Option<String>,
+    /// First-run wizard state, keyed by monitor id.
+    setup: HashMap<String, Setup>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The two-step first-run flow for one monitor: tick which ports have a
+/// computer on them, then say what each one is called.
+#[derive(Default, Clone)]
+struct Setup {
+    chosen: Vec<u8>,
+    naming: bool,
+    /// Which of the chosen ports this computer is on.
+    local: Option<u8>,
+}
+
+/// One-tap names offered while setting up, so the common case needs no typing.
+const NAME_SUGGESTIONS: [&str; 4] = ["台式机", "公司电脑", "笔记本", "游戏机"];
+
+/// A monitor shared by several computers needs to tell them apart at a glance
+/// in three places at once (list, tray, quick-switch panel), so each endpoint
+/// keeps one hue wherever it appears.
+fn endpoint_color(index: usize) -> Hsla {
+    const HUES: [f32; 4] = [0.58, 0.09, 0.78, 0.45];
+    hsla(HUES[index % HUES.len()], 0.72, 0.55, 1.0)
+}
+
+/// A hotkey spec like `ctrl+alt+I` drawn as key caps.
+fn hotkey_caps(spec: &str, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    h_flex()
+        .gap_1()
+        .children(spec.split('+').filter(|k| !k.trim().is_empty()).map(|key| {
+            let label = match key.trim().to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => "Ctrl".to_string(),
+                "alt" => "Alt".to_string(),
+                "shift" => "Shift".to_string(),
+                "win" | "super" | "meta" => "Win".to_string(),
+                other => other.to_uppercase(),
+            };
+            div()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(label)
+        }))
+}
+
+/// Identity of one endpoint row.
+fn endpoint_key(monitor_id: &str, port: u8) -> String {
+    format!("{monitor_id}@{port:#04X}")
 }
 
 impl MainWindow {
@@ -134,6 +195,9 @@ impl MainWindow {
             tab: Tab::Monitors,
             sliders: HashMap::new(),
             numbers,
+            names: HashMap::new(),
+            port_picker: None,
+            setup: HashMap::new(),
             _subscriptions: vec![observe, appearance],
         };
         this.sync_controls(window, cx);
@@ -208,6 +272,109 @@ impl MainWindow {
             self._subscriptions.push(sub);
             self.sliders.insert(key, slider);
         }
+
+        self.sync_endpoints(window, cx);
+    }
+
+    /// One editable name per configured endpoint, created on demand so typing
+    /// is never interrupted by a repaint, plus the first-run wizard state.
+    fn sync_endpoints(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Ports the wizard has ticked but not yet committed. They need name
+        // fields too, or the naming step would render empty rows.
+        let pending: Vec<(String, Vec<u8>, Option<u8>)> = self
+            .setup
+            .iter()
+            .map(|(id, s)| (id.clone(), s.chosen.clone(), s.local))
+            .collect();
+
+        // Read everything up front: building an input re-enters the controller.
+        let wanted: Vec<(String, String, u8, String)> = {
+            let c = self.controller.read(cx);
+            c.monitors
+                .iter()
+                .flat_map(|m| {
+                    let id = m.id().to_string();
+                    let prefs = c.monitor_prefs(&id);
+                    let mut ports = c.endpoints(m);
+                    for (pending_id, chosen, local) in &pending {
+                        if pending_id != &id {
+                            continue;
+                        }
+                        for port in chosen {
+                            if !ports.contains(port) {
+                                ports.push(*port);
+                            }
+                        }
+                        let _ = local;
+                    }
+                    let draft = pending.iter().find(|(pid, ..)| pid == &id);
+                    ports.into_iter().map(move |port| {
+                        // This computer's name is never typed: it comes from the
+                        // system, including while the wizard is still open.
+                        let name = prefs
+                            .input_names
+                            .get(&port)
+                            .filter(|n| !n.trim().is_empty())
+                            .cloned()
+                            .unwrap_or_else(|| match draft {
+                                Some((_, _, local)) if *local == Some(port) => platform::local_hostname(),
+                                _ => String::new(),
+                            });
+                        (endpoint_key(&id, port), id.clone(), port, name)
+                    })
+                })
+                .collect()
+        };
+
+        self.names.retain(|key, _| wanted.iter().any(|(k, ..)| k == key));
+        for (key, id, port, name) in wanted {
+            if let Some(state) = self.names.get(&key) {
+                // Don't overwrite what the user is in the middle of typing.
+                let state_ref = state.read(cx);
+                if !state_ref.focus_handle(cx).is_focused(window) && state_ref.value() != name {
+                    let state = state.clone();
+                    state.update(cx, |s, cx| s.set_value(name, window, cx));
+                }
+                continue;
+            }
+            let controller = self.controller.clone();
+            let state = cx.new(|cx| InputState::new(window, cx).default_value(name));
+            let sub = cx.subscribe_in(&state, window, move |_, state, event: &InputEvent, _, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    return;
+                }
+                let text = state.read(cx).value().to_string();
+                controller.update(cx, |c, cx| c.set_input_name(&id, port, text, cx));
+            });
+            self._subscriptions.push(sub);
+            self.names.insert(key, state);
+        }
+
+        // Seed the wizard for monitors with no endpoint list yet, and drop it
+        // once a monitor is configured.
+        let (unconfigured, configured): (Vec<(String, Option<u8>)>, Vec<String>) = {
+            let c = self.controller.read(cx);
+            c.monitors.iter().fold((Vec::new(), Vec::new()), |mut acc, m| {
+                let id = m.id().to_string();
+                let current = m.current_input;
+                if c.endpoints(m).is_empty() {
+                    acc.0.push((id, current));
+                } else {
+                    acc.1.push(id);
+                }
+                acc
+            })
+        };
+        for id in configured {
+            self.setup.remove(&id);
+        }
+        for (id, current) in unconfigured {
+            self.setup.entry(id).or_insert_with(|| Setup {
+                chosen: current.into_iter().collect(),
+                naming: false,
+                local: current,
+            });
+        }
     }
 
     // ---- monitors tab ------------------------------------------------------
@@ -281,11 +448,9 @@ impl MainWindow {
         list.into_any_element()
     }
 
-    fn render_monitor(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &App) -> impl IntoElement {
+    fn render_monitor(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let id = m.id().to_string();
-        let inputs = c.inputs_for(m);
-        let pair = c.toggle_pair(m);
 
         let feature_row = |code: u8, label: &'static str, icon: Lucide| {
             let row = h_flex()
@@ -301,52 +466,6 @@ impl MainWindow {
                 ),
                 None => row.child(div().text_sm().text_color(theme.muted_foreground).child("不支持")),
             }
-        };
-
-        let input_buttons = h_flex().gap_2().flex_wrap().children(inputs.iter().map(|&code| {
-            let controller = self.controller.clone();
-            let id = id.clone();
-            let active = m.current_input == Some(code);
-            Button::new(SharedString::from(format!("in-{idx}-{code}")))
-                .small()
-                .when(active, |b| b.primary())
-                .when(!active, |b| b.outline())
-                .label(c.input_label(&id, code))
-                .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.switch_input(&id, code, cx)))
-        }));
-
-        let pair_picker = |slot: usize| {
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    div()
-                        .w(px(18.))
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.muted_foreground)
-                        .child(["A", "B"][slot]),
-                )
-                .child(h_flex().gap_1().flex_wrap().children(inputs.iter().map(|&code| {
-                    let controller = self.controller.clone();
-                    let id = id.clone();
-                    let selected = pair.is_some_and(|p| p[slot] == code);
-                    Button::new(SharedString::from(format!("pair-{idx}-{slot}-{code}")))
-                        .xsmall()
-                        .when(selected, |b| b.primary())
-                        .when(!selected, |b| b.ghost())
-                        .label(c.input_label(&id, code))
-                        .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.set_toggle_slot(&id, slot, code, cx)))
-                })))
-        };
-        let toggle_hint = match pair {
-            Some([a, b]) if a != b => format!(
-                "按 {} 或点托盘菜单「切换显示器输入」，在 {} 和 {} 之间来回切换",
-                c.config.hotkeys.toggle_input,
-                c.input_label(&id, a),
-                c.input_label(&id, b)
-            ),
-            _ => "选择两个输入（例如台式机和笔记本各自连接的接口），之后就能一键来回切换".to_string(),
         };
 
         let model = m
@@ -367,8 +486,549 @@ impl MainWindow {
             )
             .child(feature_row(VCP_BRIGHTNESS, "亮度", Lucide::Sun))
             .child(feature_row(VCP_CONTRAST, "对比度", Lucide::Contrast))
-            .child(section_label("输入源", cx))
-            .child(input_buttons)
+            .child(self.render_switching(idx, m, c, cx))
+            .when(c.config.developer_mode, |el| el.child(render_diagnostics(m, cx)))
+    }
+
+    /// The input-switching block. Until a monitor has been through setup this
+    /// is the wizard; afterwards it is the list of computers sharing it.
+    fn render_switching(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> AnyElement {
+        let id = m.id().to_string();
+        let inputs = c.inputs_for(m);
+        if let Some(setup) = self.setup.get(&id)
+            && (setup.naming || !c.endpoints_configured(m))
+        {
+            return self.render_wizard(idx, m, setup, &inputs, cx);
+        }
+        let endpoints = c.endpoints(m);
+        if endpoints.is_empty() {
+            return div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("这台显示器没有上报输入列表，先在配置文件的 extra_inputs 里补上接口。")
+                .into_any_element();
+        }
+        self.render_roster(idx, m, c, &endpoints, &inputs, cx)
+    }
+
+    // ---- first-run wizard --------------------------------------------------
+
+    fn render_wizard(
+        &self,
+        idx: usize,
+        m: &MonitorEntry,
+        setup: &Setup,
+        inputs: &[u8],
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let id = m.id().to_string();
+        let header = |icon: Lucide, text: &'static str| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(Icon::new(icon).size(px(14.)))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(text))
+        };
+
+        if !setup.naming {
+            // Step 1: which ports actually have a computer behind them. A
+            // monitor reporting four inputs does not mean four computers.
+            let chips = inputs.iter().map(|&port| {
+                let id = id.clone();
+                let on = setup.chosen.contains(&port);
+                let here = m.current_input == Some(port);
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new(SharedString::from(format!("pick-{idx}-{port}")))
+                            .small()
+                            .when(on, |b| b.primary())
+                            .when(!on, |b| b.outline())
+                            .label(mccs::input_source_name(port))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let entry = this.setup.entry(id.clone()).or_default();
+                                match entry.chosen.iter().position(|p| *p == port) {
+                                    Some(ix) => {
+                                        entry.chosen.remove(ix);
+                                    }
+                                    None => entry.chosen.push(port),
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(here, |el| {
+                        el.child(div().text_xs().text_color(theme.muted_foreground).child("本机"))
+                    })
+            });
+            let count = setup.chosen.len();
+            return v_flex()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(theme.muted)
+                .child(header(Lucide::ArrowLeftRight, "这台显示器上接着几台电脑？"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("把真正接着电脑的口点亮。空着的口、接游戏机或电视盒子的口，都可以不选。"),
+                )
+                .child(h_flex().gap_2().flex_wrap().children(chips))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(match m.current_input {
+                            Some(port) => format!(
+                                "显示器当前显示的是 {}，所以它默认算作这台电脑。不对的话点一下换个口。",
+                                mccs::input_source_name(port)
+                            ),
+                            None => "显示器没有上报当前输入，稍后可以手动指认哪台是这台电脑。".to_string(),
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!("wizard-next-{idx}")))
+                                .primary()
+                                .label(if count >= 2 {
+                                    format!("下一步：给这 {count} 台起名")
+                                } else {
+                                    "至少选两台才能一键切换".to_string()
+                                })
+                                .disabled(count < 2)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(entry) = this.setup.get_mut(&id) {
+                                        entry.naming = true;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            // The names live on the monitor, so a machine that
+                            // has already been set up can hand them over.
+                            Button::new(SharedString::from(format!("wizard-paste-{idx}")))
+                                .outline()
+                                .label("从另一台电脑粘贴")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let text = cx
+                                        .read_from_clipboard()
+                                        .and_then(|item| item.text())
+                                        .unwrap_or_default();
+                                    this.controller.update(cx, |c, cx| c.import_switching(&text, cx));
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        // Step 2: names. This is the whole point — a port number can never tell
+        // the user which machine they are looking at.
+        let rows = setup.chosen.iter().enumerate().map(|(ix, &port)| {
+            let key = endpoint_key(&id, port);
+            let here = setup.local == Some(port);
+            let suggestions = NAME_SUGGESTIONS.iter().map(|name| {
+                let id = id.clone();
+                let key = key.clone();
+                let name = SharedString::from(*name);
+                let label = name.clone();
+                let picked = self
+                    .names
+                    .get(&key)
+                    .map(|state| state.read(cx).value() == name)
+                    .unwrap_or(false);
+                Button::new(SharedString::from(format!("suggest-{idx}-{ix}-{label}")))
+                    .xsmall()
+                    .when(picked, |b| b.primary())
+                    .when(!picked, |b| b.ghost())
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(state) = this.names.get(&key).cloned() {
+                            state.update(cx, |s, cx| s.set_value(name.clone(), window, cx));
+                        }
+                        this.controller
+                            .update(cx, |c, cx| c.set_input_name(&id, port, name.to_string(), cx));
+                        cx.notify();
+                    }))
+            });
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(18.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{}", ix + 1)),
+                        )
+                        .child({
+                            let id = id.clone();
+                            let current_local = setup.local;
+                            div()
+                                .id(SharedString::from(format!("wizard-local-{idx}-{ix}")))
+                                .w(px(22.))
+                                .h(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .hover(|s| s.bg(theme.muted))
+                                .child(div().size(px(9.)).rounded_full().bg(if here {
+                                    theme.success
+                                } else {
+                                    endpoint_color(ix)
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(entry) = this.setup.get_mut(&id) {
+                                        entry.local = Some(port);
+                                    }
+                                    let _ = current_local;
+                                    cx.notify();
+                                }))
+                        })
+                        .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(mccs::input_source_name(port)),
+                        )
+                        .when(here, |el| {
+                            el.child(
+                                div()
+                                    .px_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("本机"),
+                            )
+                        }),
+                )
+                .child(h_flex().gap_1().pl_4().children(suggestions))
+        });
+
+        v_flex()
+            .gap_3()
+            .p_3()
+            .rounded_md()
+            .bg(theme.muted)
+            .child(header(Lucide::Laptop, "给它们起个名字"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("名字会出现在这里、托盘菜单和快切面板上 —— 这是唯一能让你一眼认出谁是谁的东西。"),
+            )
+            .children(rows)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "这台电脑的名字自动取系统里的「{}」，其余的点一下常用名就行。另一台电脑上也装一份 tarsier，把这套名字粘过去，第 3、第 4 台就都不用再填了。",
+                        platform::local_hostname()
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("wizard-back-{idx}")))
+                            .outline()
+                            .label("上一步")
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |this, _, _, cx| {
+                                    if let Some(entry) = this.setup.get_mut(&id) {
+                                        entry.naming = false;
+                                    }
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("wizard-done-{idx}")))
+                            .primary()
+                            .label("完成")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let Some(setup) = this.setup.get(&id).cloned() else {
+                                    return;
+                                };
+                                let local = setup
+                                    .local
+                                    .filter(|p| setup.chosen.contains(p))
+                                    .or_else(|| setup.chosen.first().copied());
+                                let names: Vec<(u8, String)> = setup
+                                    .chosen
+                                    .iter()
+                                    .map(|port| {
+                                        let value = this
+                                            .names
+                                            .get(&endpoint_key(&id, *port))
+                                            .map(|s| s.read(cx).value().to_string())
+                                            .unwrap_or_default();
+                                        (*port, value)
+                                    })
+                                    .collect();
+                                let ports = setup.chosen.clone();
+                                this.controller.update(cx, |c, cx| {
+                                    c.set_endpoints(&id, ports, local, cx);
+                                    for (port, name) in names {
+                                        c.set_input_name(&id, port, name, cx);
+                                    }
+                                });
+                                this.setup.remove(&id);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    // ---- configured endpoint list ------------------------------------------
+
+    fn render_roster(
+        &self,
+        idx: usize,
+        m: &MonitorEntry,
+        c: &Controller,
+        endpoints: &[u8],
+        inputs: &[u8],
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let id = m.id().to_string();
+        let local = c.local_input(m);
+        let current = m.current_input;
+        let n = endpoints.len();
+
+        let rows = endpoints.iter().enumerate().map(|(ix, &port)| {
+            let active = current == Some(port);
+            let here = local == Some(port);
+            let key = endpoint_key(&id, port);
+            let picker_open = self.port_picker.as_deref() == Some(key.as_str());
+
+            let strip = picker_open.then(|| {
+                let free = inputs.iter().copied().filter(|p| *p == port || !endpoints.contains(p));
+                h_flex().gap_1().flex_wrap().pl_4().children(free.map(|p| {
+                    let id = id.clone();
+                    Button::new(SharedString::from(format!("setport-{idx}-{ix}-{p}")))
+                        .xsmall()
+                        .when(p == port, |b| b.primary())
+                        .when(p != port, |b| b.ghost())
+                        .label(mccs::input_source_name(p))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.controller
+                                .update(cx, |c, cx| c.set_endpoint_port(&id, port, p, cx));
+                            this.port_picker = None;
+                            cx.notify();
+                        }))
+                }))
+            });
+
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .when(active, |el| el.bg(theme.muted))
+                        .children((n >= 3).then(|| {
+                            div()
+                                .w(px(16.))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{}", ix + 1))
+                        }))
+                        .child({
+                            let id = id.clone();
+                            div()
+                                .id(SharedString::from(format!("local-{idx}-{ix}")))
+                                .w(px(22.))
+                                .h(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .hover(|s| s.bg(theme.border))
+                                .child(div().size(px(9.)).rounded_full().bg(if here {
+                                    theme.success
+                                } else {
+                                    endpoint_color(ix)
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.controller.update(cx, |c, cx| c.set_local_input(&id, port, cx));
+                                    cx.notify();
+                                }))
+                        })
+                        .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
+                        .when(here, |el| {
+                            el.child(
+                                div()
+                                    .px_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("本机"),
+                            )
+                        })
+                        .when(active, |el| {
+                            el.child(
+                                div()
+                                    .px_2()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(theme.success)
+                                    .child("正在显示"),
+                            )
+                        })
+                        .child(div().flex_1())
+                        .when(!active, |el| {
+                            let id = id.clone();
+                            el.child(
+                                Button::new(SharedString::from(format!("go-{idx}-{ix}")))
+                                    .xsmall()
+                                    .ghost()
+                                    .label("切到这里")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.port_picker = None;
+                                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
+                                    })),
+                            )
+                        })
+                        .child({
+                            let key = key.clone();
+                            Button::new(SharedString::from(format!("port-{idx}-{ix}")))
+                                .xsmall()
+                                .outline()
+                                .label(mccs::input_source_name(port))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.port_picker =
+                                        (this.port_picker.as_deref() != Some(key.as_str())).then(|| key.clone());
+                                    cx.notify();
+                                }))
+                        })
+                        .children((n > 2).then(|| {
+                            let id = id.clone();
+                            Button::new(SharedString::from(format!("drop-{idx}-{ix}")))
+                                .xsmall()
+                                .ghost()
+                                .label("✕")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.port_picker = None;
+                                    this.controller.update(cx, |c, cx| c.remove_endpoint(&id, port, cx));
+                                }))
+                        })),
+                )
+                .children(strip)
+        });
+
+        // The one action worth a big button is the one that always works; with
+        // three or more endpoints the hotkey has to ask, so the button does too.
+        let label = |port: u8| c.monitor_prefs(&id).label(port);
+        let target = current.and_then(|cur| endpoints.iter().copied().find(|p| *p != cur));
+        let action: AnyElement = match (n, target) {
+            (2, Some(port)) => {
+                let id = id.clone();
+                Button::new(SharedString::from(format!("switch-{idx}")))
+                    .primary()
+                    .label(format!("切换到 {}", label(port)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.port_picker = None;
+                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
+                    }))
+                    .into_any_element()
+            }
+            (2, None) => div().into_any_element(),
+            _ => Button::new(SharedString::from(format!("switch-{idx}")))
+                .primary()
+                .label("切换…")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.controller.update(cx, |c, cx| c.open_switch_hud(cx));
+                }))
+                .into_any_element(),
+        };
+
+        let hotkey = c.config.hotkeys.toggle_input.clone();
+        let hint = if current.is_none() {
+            "这台显示器不上报当前输入，所以按钮不替你猜目的地 —— 点某一行的「切到这里」就行。".to_string()
+        } else if n == 2 {
+            format!(
+                "按快捷键直接切到 {}，再按一次切回来。",
+                label(target.unwrap_or(endpoints[0]))
+            )
+        } else {
+            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。".to_string()
+        };
+
+        v_flex()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(theme.muted)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(if n == 2 {
+                        "一键切换"
+                    } else {
+                        "输入切换"
+                    }))
+                    .child(div().flex_1())
+                    .child(hotkey_caps(&hotkey, cx)),
+            )
+            .children(rows)
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child({
+                        let id = id.clone();
+                        let free = inputs.iter().copied().find(|p| !endpoints.contains(p));
+                        Button::new(SharedString::from(format!("add-{idx}")))
+                            .xsmall()
+                            .ghost()
+                            .label("+ 添加电脑")
+                            .disabled(free.is_none())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(port) = free {
+                                    this.controller.update(cx, |c, cx| c.add_endpoint(&id, port, cx));
+                                }
+                            }))
+                    })
+                    .child(
+                        // Names belong to the monitor, so one machine's setup
+                        // can be carried to the others.
+                        Button::new(SharedString::from(format!("copy-{idx}")))
+                            .xsmall()
+                            .ghost()
+                            .label("复制到别的电脑")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let text = this.controller.read(cx).export_switching();
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                this.controller.update(cx, |c, cx| {
+                                    c.notice = Some("已复制。在另一台电脑上点「从另一台电脑粘贴」。".into());
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            )
+            .child(action)
+            .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
             .when(!m.inputs_reported(), |el| {
                 el.child(
                     div()
@@ -377,24 +1037,7 @@ impl MainWindow {
                         .child("显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。"),
                 )
             })
-            .child(
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .bg(theme.muted)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
-                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("一键切换")),
-                    )
-                    .child(pair_picker(0))
-                    .child(pair_picker(1))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(toggle_hint)),
-            )
-            .when(c.config.developer_mode, |el| el.child(render_diagnostics(m, cx)))
+            .into_any_element()
     }
 
     // ---- breaks tab --------------------------------------------------------
@@ -714,14 +1357,12 @@ impl MainWindow {
             .justify_between()
             .gap_4()
             .child(
-                v_flex()
-                    .child("外观")
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("「跟随系统」会随 Windows 的浅色 / 深色设置实时切换"),
-                    ),
+                v_flex().child("外观").child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("「跟随系统」会随 Windows 的浅色 / 深色设置实时切换"),
+                ),
             )
             .child(theme_picker());
 

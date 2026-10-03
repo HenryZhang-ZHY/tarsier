@@ -15,7 +15,9 @@ use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
 use crate::platform;
 use crate::stats::{Session, Stats};
+use crate::tray;
 use crate::ui::break_overlay::{BreakOverlay, FADE_OUT};
+use crate::ui::switch_hud::{self, SwitchHud};
 
 pub struct MonitorEntry {
     pub dev: Arc<display::Monitor>,
@@ -54,6 +56,10 @@ pub struct Controller {
     pub hotkey_errors: Vec<String>,
     writes: HashMap<(String, u8), WriteSlot>,
     overlays: Vec<(WindowHandle<BreakOverlay>, Entity<BreakOverlay>)>,
+    /// One quick-switch panel per display while it is open.
+    switch_huds: Vec<WindowHandle<SwitchHud>>,
+    /// The window that had focus before the panel took it, to hand it back.
+    switch_hud_return_to: Option<isize>,
     last_tick: Instant,
     last_save: Instant,
     stats_dirty: bool,
@@ -67,6 +73,28 @@ pub fn now_ts() -> i64 {
     Local::now().timestamp()
 }
 
+/// The tray entry that names where the hotkey will land.
+///
+/// Only a single monitor shared by exactly two computers has an unambiguous
+/// "the other one". With three or more there is no single destination, so the
+/// menu names the action instead and the hotkey opens the chooser.
+pub fn switch_headline(groups: &[tray::TrayGroup]) -> Option<String> {
+    let [group] = groups else {
+        return None;
+    };
+    let [a, b] = group.endpoints.as_slice() else {
+        return None;
+    };
+    let target = match (a.current, b.current) {
+        (true, false) => b,
+        (false, true) => a,
+        // Nothing is known about the current input, so there is no honest
+        // destination to name. The flip itself still works.
+        _ => return None,
+    };
+    Some(format!("⇄ 切换到 {}", target.name))
+}
+
 pub fn local_date(ts: i64) -> NaiveDate {
     Local
         .timestamp_opt(ts, 0)
@@ -77,7 +105,8 @@ pub fn local_date(ts: i64) -> NaiveDate {
 
 impl Controller {
     pub fn init(cx: &mut App) -> Entity<Controller> {
-        let config: Config = config::load(&config::config_path());
+        let mut config: Config = config::load(&config::config_path());
+        config.migrate();
         let stats: Stats = config::load(&config::stats_path());
         let tracker = BreakTracker::new(config.breaks.settings(), now_ts());
         crate::logger::set_verbose(config.developer_mode);
@@ -94,6 +123,8 @@ impl Controller {
                 hotkey_errors: Vec::new(),
                 writes: HashMap::new(),
                 overlays: Vec::new(),
+                switch_huds: Vec::new(),
+                switch_hud_return_to: None,
                 last_tick: Instant::now(),
                 last_save: Instant::now(),
                 stats_dirty: false,
@@ -183,30 +214,119 @@ impl Controller {
     }
 
     pub fn input_label(&self, monitor_id: &str, code: u8) -> String {
+        self.monitor_prefs(monitor_id).label(code)
+    }
+
+    /// The ports this monitor is shared between, in quick-switch order.
+    ///
+    /// Falls back to the only two inputs a monitor reports, so one that is
+    /// plainly shared by two computers needs no setup at all.
+    pub fn endpoints(&self, entry: &MonitorEntry) -> Vec<u8> {
+        let configured = self.monitor_prefs(entry.id()).endpoints;
+        if !configured.is_empty() {
+            return configured;
+        }
+        let reported = entry.dev.input_sources();
+        if reported.len() == 2 { reported } else { Vec::new() }
+    }
+
+    /// Whether the user has been through setup for this monitor, as opposed to
+    /// the two-input fallback above.
+    pub fn endpoints_configured(&self, entry: &MonitorEntry) -> bool {
+        !self.monitor_prefs(entry.id()).endpoints.is_empty()
+    }
+
+    /// The port this computer is plugged into; display only, never trusted for
+    /// switching.
+    pub fn local_input(&self, entry: &MonitorEntry) -> Option<u8> {
+        self.monitor_prefs(entry.id()).local_input
+    }
+
+    /// At least one monitor has three or more computers, so a single hotkey can
+    /// no longer say what it will do and has to ask.
+    pub fn needs_picker(&self) -> bool {
+        self.monitors.iter().any(|m| self.endpoints(m).len() > 2)
+    }
+
+    /// Replaces the endpoint list, e.g. when the setup wizard finishes. Names
+    /// this computer after itself — the only endpoint name that can be
+    /// inferred rather than asked for.
+    pub fn set_endpoints(&mut self, monitor_id: &str, ports: Vec<u8>, local: Option<u8>, cx: &mut Context<Self>) {
+        let prefs = self.config.monitors.entry(monitor_id.to_string()).or_default();
+        prefs.endpoints = ports;
+        if local.is_some() {
+            prefs.local_input = local;
+        }
+        if let Some(port) = prefs.local_input
+            && !prefs.is_named(port)
+        {
+            prefs.input_names.insert(port, platform::local_hostname());
+        }
+        self.save_config();
+        cx.notify();
+    }
+
+    /// Points an endpoint at a different port. If another endpoint is already
+    /// there the two swap, so a port never hosts two computers.
+    pub fn set_endpoint_port(&mut self, monitor_id: &str, from: u8, to: u8, cx: &mut Context<Self>) {
+        if from == to {
+            return;
+        }
         self.config
             .monitors
-            .get(monitor_id)
-            .and_then(|p| p.input_names.get(&code).cloned())
-            .unwrap_or_else(|| mccs::input_source_name(code))
+            .entry(monitor_id.to_string())
+            .or_default()
+            .move_endpoint(from, to);
+        self.save_config();
+        cx.notify();
     }
 
-    /// Effective toggle pair: configured, or the only two inputs a monitor reports.
-    pub fn toggle_pair(&self, entry: &MonitorEntry) -> Option<[u8; 2]> {
-        self.monitor_prefs(entry.id()).toggle.or_else(|| {
-            let reported = entry.dev.input_sources();
-            (reported.len() == 2).then(|| [reported[0], reported[1]])
-        })
+    /// Adds one computer to a monitor's list. The new row starts unnamed; the
+    /// UI focuses it straight away.
+    pub fn add_endpoint(&mut self, monitor_id: &str, port: u8, cx: &mut Context<Self>) {
+        let prefs = self.config.monitors.entry(monitor_id.to_string()).or_default();
+        if prefs.endpoints.contains(&port) {
+            return;
+        }
+        prefs.endpoints.push(port);
+        self.save_config();
+        cx.notify();
     }
 
-    pub fn set_toggle_slot(&mut self, monitor_id: &str, slot: usize, code: u8, cx: &mut Context<Self>) {
-        let current = self
-            .monitors
-            .iter()
-            .find(|m| m.id() == monitor_id)
-            .and_then(|m| self.toggle_pair(m));
-        let mut pair = current.unwrap_or([code, code]);
-        pair[slot] = code;
-        self.config.monitors.entry(monitor_id.to_string()).or_default().toggle = Some(pair);
+    /// Drops a monitor back to fewer computers. Removing this computer forgets
+    /// which port it is on rather than guessing another.
+    pub fn remove_endpoint(&mut self, monitor_id: &str, port: u8, cx: &mut Context<Self>) {
+        let prefs = self.config.monitors.entry(monitor_id.to_string()).or_default();
+        prefs.endpoints.retain(|p| *p != port);
+        if prefs.local_input == Some(port) {
+            prefs.local_input = None;
+        }
+        self.save_config();
+        cx.notify();
+    }
+
+    /// Renames the computer on one port. A blank name falls back to the
+    /// monitor's own `DisplayPort 2` style label.
+    pub fn set_input_name(&mut self, monitor_id: &str, port: u8, name: String, cx: &mut Context<Self>) {
+        let prefs = self.config.monitors.entry(monitor_id.to_string()).or_default();
+        if name.trim().is_empty() {
+            prefs.input_names.remove(&port);
+        } else {
+            prefs.input_names.insert(port, name.trim().to_string());
+        }
+        self.save_config();
+        cx.notify();
+    }
+
+    /// Marks which port this computer is on. Decoration only — it changes what
+    /// the UI says, never where the switch goes.
+    pub fn set_local_input(&mut self, monitor_id: &str, port: u8, cx: &mut Context<Self>) {
+        let default_name = platform::local_hostname();
+        let prefs = self.config.monitors.entry(monitor_id.to_string()).or_default();
+        prefs.local_input = Some(port);
+        if !prefs.is_named(port) {
+            prefs.input_names.insert(port, default_name);
+        }
         self.save_config();
         cx.notify();
     }
@@ -318,16 +438,20 @@ impl Controller {
         .detach();
     }
 
-    /// Flip every monitor that has a toggle pair to the other input.
+    /// Flip every monitor that is shared by exactly two computers to the other
+    /// one. Monitors with three or more are skipped: flipping is only
+    /// unambiguous when there is a single other side to flip to.
     pub fn toggle_inputs(&mut self, cx: &mut Context<Self>) {
         let jobs: Vec<(Arc<display::Monitor>, [u8; 2], Option<u8>)> = self
             .monitors
             .iter()
-            .filter_map(|m| Some((m.dev.clone(), self.toggle_pair(m)?, m.current_input)))
-            .filter(|(_, [a, b], _)| a != b)
+            .filter_map(|m| {
+                let ports = self.endpoints(m);
+                (ports.len() == 2).then(|| (m.dev.clone(), [ports[0], ports[1]], m.current_input))
+            })
             .collect();
         if jobs.is_empty() {
-            self.notice = Some("还没有设置快捷切换的两个输入，请在「显示器」页选择".into());
+            self.notice = Some("还没有设置要切换的电脑，请在「显示器」页添加".into());
             cx.notify();
             self.show_main_window(cx);
             return;
@@ -611,6 +735,189 @@ impl Controller {
         self.save_stats();
     }
 
+    /// Everything about input switching that another computer can use, as text
+    /// for the clipboard. See [`config::SwitchingExport`].
+    pub fn export_switching(&self) -> String {
+        let monitors = self
+            .monitors
+            .iter()
+            .map(|m| (m.dev.name.clone(), self.monitor_prefs(m.id()).portable()))
+            .collect();
+        serde_json::to_string_pretty(&config::SwitchingExport {
+            version: config::SWITCHING_EXPORT_VERSION,
+            monitors,
+        })
+        .unwrap_or_default()
+    }
+
+    /// Applies a [`Self::export_switching`] blob from another computer.
+    /// Returns how many of this machine's monitors it matched.
+    pub fn import_switching(&mut self, text: &str, cx: &mut Context<Self>) -> usize {
+        let Ok(export) = serde_json::from_str::<config::SwitchingExport>(text) else {
+            self.notice = Some("剪贴板里没有 tarsier 的输入切换设置".into());
+            cx.notify();
+            return 0;
+        };
+        let targets: Vec<(String, Option<u8>, MonitorPrefs)> = self
+            .monitors
+            .iter()
+            .filter_map(|m| {
+                Some((
+                    m.id().to_string(),
+                    m.current_input,
+                    export.monitors.get(&m.dev.name)?.clone(),
+                ))
+            })
+            .collect();
+        let matched = targets.len();
+        for (id, current, incoming) in targets {
+            let prefs = self.config.monitors.entry(id).or_default();
+            prefs.endpoints = incoming.endpoints;
+            prefs.input_names = incoming.input_names;
+            prefs.extra_inputs = incoming.extra_inputs;
+            prefs.input_protocol = incoming.input_protocol;
+            // Which port this computer is on cannot be copied — every machine
+            // is plugged into a different one — so ask the monitor instead.
+            prefs.local_input = current;
+            if let Some(port) = prefs.local_input
+                && !prefs.is_named(port)
+            {
+                prefs.input_names.insert(port, platform::local_hostname());
+            }
+        }
+        self.save_config();
+        self.notice = Some(
+            match matched {
+                0 => "剪贴板里的设置和当前接的显示器对不上".to_string(),
+                n => format!("已应用到 {n} 台显示器"),
+            }
+            .into(),
+        );
+        cx.notify();
+        matched
+    }
+
+    /// Shows the quick-switch panel. A monitor shared by three or more
+    /// computers cannot be served by a blind flip: cycling would have to go
+    /// through the intermediate machine — two switches, two screen blanks, and
+    /// a detour — and on a monitor that ignores commands on an inactive input
+    /// the second one would never arrive. So the user names the destination up
+    /// front and tarsier jumps straight there.
+    pub fn open_switch_hud(&mut self, cx: &mut Context<Self>) {
+        if !self.switch_huds.is_empty() {
+            return;
+        }
+        // Remember who had the user's attention before the panel took it.
+        self.switch_hud_return_to = platform::foreground_window();
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            let mut handles = Vec::new();
+            for display in cx.displays() {
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(display.bounds())),
+                    titlebar: None,
+                    // The hotkey was an explicit request for a chooser, so
+                    // taking focus for its lifetime is expected — and it is
+                    // what makes Esc and the number keys work.
+                    focus: true,
+                    show: true,
+                    kind: WindowKind::PopUp,
+                    is_movable: false,
+                    is_resizable: false,
+                    is_minimizable: false,
+                    display_id: Some(display.id()),
+                    window_background: WindowBackgroundAppearance::Transparent,
+                    ..Default::default()
+                };
+                // No component `Root`: it would paint an opaque background over
+                // the whole display. The panel draws its own.
+                match cx.open_window(options, |window, cx| cx.new(|cx| SwitchHud::new(window, cx))) {
+                    Ok(handle) => handles.push(handle),
+                    Err(e) => log::error!("failed to open switch panel: {e}"),
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.switch_huds = handles;
+                cx.notify();
+            });
+        });
+        // A stray hotkey should never leave a panel parked over the desktop.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(switch_hud::TIMEOUT).await;
+            this.update(cx, |this, cx| this.close_switch_hud(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Closes the quick-switch panel wherever it is showing, and gives focus
+    /// back to whatever had it beforehand. Safe to call when it is not open.
+    pub fn close_switch_hud(&mut self, cx: &mut Context<Self>) {
+        let handles: Vec<_> = self.switch_huds.drain(..).collect();
+        let return_to = self.switch_hud_return_to.take();
+        if handles.is_empty() && return_to.is_none() {
+            return;
+        }
+        for handle in handles {
+            handle.update(cx, |_, window, _| window.remove_window()).ok();
+        }
+        // Changing your mind about the switch should not leave your application
+        // stranded in the background, so the round trip is invisible.
+        if let Some(hwnd) = return_to {
+            platform::restore_foreground(hwnd);
+        }
+    }
+
+    /// What the tray menu should show right now. Compared by value on the tray
+    /// side, so this can be rebuilt freely.
+    pub fn tray_state(&self) -> tray::TrayState {
+        let groups: Vec<tray::TrayGroup> = self
+            .monitors
+            .iter()
+            .filter_map(|m| {
+                let ports = self.endpoints(m);
+                if ports.len() < 2 {
+                    return None;
+                }
+                Some(tray::TrayGroup {
+                    monitor: m.dev.name.clone(),
+                    endpoints: ports
+                        .iter()
+                        .map(|&port| tray::TrayEndpoint {
+                            port,
+                            name: self.input_label(m.id(), port),
+                            current: m.current_input == Some(port),
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+
+        // Only one monitor shared by exactly two computers has an unambiguous
+        // "the other one", and only then can the menu name the destination.
+        let headline = switch_headline(&groups);
+
+        tray::TrayState {
+            groups,
+            headline,
+            paused: self.is_paused() || !self.config.breaks.enabled,
+            break_active: matches!(self.tracker.phase(), Phase::Prompted { .. }),
+            tooltip: self.tooltip_text(),
+        }
+    }
+
+    /// One line summarising tarsier, shown when hovering the tray icon.
+    pub fn tooltip_text(&self) -> String {
+        let score = self.today_score().map_or("--".to_string(), |s| s.to_string());
+        let state = if !self.config.breaks.enabled {
+            "休息提醒已关闭".to_string()
+        } else if self.is_paused() {
+            "提醒已暂停".to_string()
+        } else {
+            format!("{} 分钟后休息", self.tracker.until_prompt().div_ceil(60))
+        };
+        format!("tarsier · {state} · 今日 {score} 分")
+    }
+
     pub fn show_main_window(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.main_window
             && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
@@ -630,6 +937,76 @@ impl Controller {
 /// window appearance observer.
 pub fn apply_theme(pref: config::ThemePref, cx: &mut App) {
     Theme::change(pref.resolve(cx.window_appearance()), None, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    // Deliberately not `use super::*`: that would pull in GPUI's own `test`
+    // attribute macro, which shadows the built-in one and recurses.
+    use super::switch_headline;
+    use crate::tray::{TrayEndpoint, TrayGroup};
+
+    fn group(monitor: &str, endpoints: &[(u8, &str, bool)]) -> TrayGroup {
+        TrayGroup {
+            monitor: monitor.to_string(),
+            endpoints: endpoints
+                .iter()
+                .map(|(port, name, current)| TrayEndpoint {
+                    port: *port,
+                    name: (*name).to_string(),
+                    current: *current,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn headline_names_the_other_computer() {
+        let setup = vec![group(
+            "27GP950",
+            &[(0x10, "MacBook Pro", true), (0x12, "台式机", false)],
+        )];
+        assert_eq!(switch_headline(&setup).as_deref(), Some("⇄ 切换到 台式机"));
+
+        // From the other side the same pair names the other destination.
+        let flipped = vec![group(
+            "27GP950",
+            &[(0x10, "MacBook Pro", false), (0x12, "台式机", true)],
+        )];
+        assert_eq!(switch_headline(&flipped).as_deref(), Some("⇄ 切换到 MacBook Pro"));
+    }
+
+    #[test]
+    fn headline_declines_when_there_is_no_single_destination() {
+        // Three computers: a flip has no one answer, so the menu names the
+        // action and the hotkey opens the chooser.
+        let three = vec![group(
+            "27GP950",
+            &[
+                (0x10, "MacBook Pro", true),
+                (0x12, "台式机", false),
+                (0x11, "游戏机", false),
+            ],
+        )];
+        assert_eq!(switch_headline(&three), None);
+
+        // Two monitors, one computer each: ambiguous for the same reason.
+        let two_monitors = vec![
+            group("A", &[(0x10, "笔记本", true), (0x12, "台式机", false)]),
+            group("B", &[(0x11, "游戏机", true), (0x0F, "NAS", false)]),
+        ];
+        assert_eq!(switch_headline(&two_monitors), None);
+
+        // Nothing is known about the current input, so there is no honest
+        // destination to name even though the flip still works.
+        let unknown = vec![group(
+            "27GP950",
+            &[(0x10, "MacBook Pro", false), (0x12, "台式机", false)],
+        )];
+        assert_eq!(switch_headline(&unknown), None);
+
+        assert_eq!(switch_headline(&[]), None);
+    }
 }
 
 fn dev_name(monitors: &[MonitorEntry], id: &str) -> String {

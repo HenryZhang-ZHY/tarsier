@@ -61,6 +61,33 @@ impl ThemePref {
     }
 }
 
+impl Config {
+    /// Brings a config written by an older version up to date. Idempotent, and
+    /// called once after loading.
+    ///
+    /// A monitor used to describe its two inputs as an unordered `toggle` pair.
+    /// That pair is now an ordered `endpoints` list — same information, but the
+    /// order is meaningful once a monitor is shared by three computers.
+    pub fn migrate(&mut self) {
+        for prefs in self.monitors.values_mut() {
+            if prefs.endpoints.is_empty()
+                && let Some([a, b]) = prefs.toggle.take()
+            {
+                prefs.endpoints.push(a);
+                if b != a {
+                    prefs.endpoints.push(b);
+                }
+            }
+            // `local_input` did not exist; the toggle's first slot is the best
+            // guess at which port this computer was on, and it is only ever
+            // used for display, so a wrong guess costs nothing.
+            if prefs.local_input.is_none() {
+                prefs.local_input = prefs.endpoints.first().copied();
+            }
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -131,9 +158,18 @@ impl Default for Hotkeys {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorPrefs {
-    /// The two inputs the toggle hotkey flips between.
+    /// The computers this monitor is shared between, in quick-switch order.
+    /// Order matters: with three or more it is the order of the number keys.
+    pub endpoints: Vec<u8>,
+    /// Which input this computer is plugged into. Display only — switching
+    /// reads the monitor's own current input and never trusts this.
+    pub local_input: Option<u8>,
+    /// Superseded by [`Self::endpoints`]; read for compatibility, upgraded by
+    /// [`Config::migrate`] and never written back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toggle: Option<[u8; 2]>,
     /// Custom labels, e.g. `{"17": "台式机", "15": "笔记本"}` (keys are decimal VCP values).
+    /// These are the computer names shown in the UI, tray and quick-switch panel.
     pub input_names: BTreeMap<u8, String>,
     /// Extra input codes for monitors that under-report their capabilities.
     pub extra_inputs: Vec<u8>,
@@ -141,6 +177,80 @@ pub struct MonitorPrefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_protocol: Option<InputProtocolPref>,
 }
+
+impl MonitorPrefs {
+    /// The name to show for an input: the user's, else the MCCS default.
+    pub fn label(&self, port: u8) -> String {
+        self.input_names
+            .get(&port)
+            .filter(|n| !n.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| crate::display::mccs::input_source_name(port))
+    }
+
+    /// Whether the user gave this port a name of their own.
+    pub fn is_named(&self, port: u8) -> bool {
+        self.input_names.get(&port).is_some_and(|n| !n.trim().is_empty())
+    }
+
+    /// The part of a monitor's settings that is a property of the *monitor*
+    /// rather than of this computer, for handing to another machine.
+    ///
+    /// `local_input` is deliberately dropped: every computer is plugged into a
+    /// different port, so the receiving machine works that out for itself.
+    pub fn portable(&self) -> MonitorPrefs {
+        MonitorPrefs {
+            endpoints: self.endpoints.clone(),
+            local_input: None,
+            toggle: None,
+            input_names: self.input_names.clone(),
+            extra_inputs: self.extra_inputs.clone(),
+            input_protocol: self.input_protocol.clone(),
+        }
+    }
+
+    /// Points one endpoint at a different port. If another computer is already
+    /// there the two swap, so a port never hosts two computers. Names belong to
+    /// the computer rather than the socket, so they travel with it.
+    pub fn move_endpoint(&mut self, from: u8, to: u8) {
+        if from == to {
+            return;
+        }
+        let Some(leaving_ix) = self.endpoints.iter().position(|p| *p == from) else {
+            return;
+        };
+        if let Some(arriving_ix) = self.endpoints.iter().position(|p| *p == to) {
+            self.endpoints[arriving_ix] = from;
+        }
+        self.endpoints[leaving_ix] = to;
+
+        let leaving = self.input_names.remove(&from);
+        let arriving = self.input_names.remove(&to);
+        if let Some(name) = arriving {
+            self.input_names.insert(from, name);
+        }
+        if let Some(name) = leaving {
+            self.input_names.insert(to, name);
+        }
+        if self.local_input == Some(from) {
+            self.local_input = Some(to);
+        }
+    }
+}
+
+/// The endpoint list and names of every monitor, carried to another computer
+/// through the clipboard.
+///
+/// Keyed by monitor *name* rather than by the `monitors` key: that key is a
+/// Windows device path, which depends on the machine's graphics topology and
+/// therefore does not survive the trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchingExport {
+    pub version: u32,
+    pub monitors: BTreeMap<String, MonitorPrefs>,
+}
+
+pub const SWITCHING_EXPORT_VERSION: u32 = 1;
 
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA")
@@ -193,10 +303,7 @@ mod tests {
         let sys_dark = WindowAppearance::Dark;
         assert_eq!(ThemePref::default(), ThemePref::System);
         assert_eq!(ThemePref::System.resolve(sys_dark), ThemeMode::Dark);
-        assert_eq!(
-            ThemePref::System.resolve(WindowAppearance::Light),
-            ThemeMode::Light
-        );
+        assert_eq!(ThemePref::System.resolve(WindowAppearance::Light), ThemeMode::Light);
         // An explicit choice ignores the system.
         assert_eq!(ThemePref::Light.resolve(sys_dark), ThemeMode::Light);
         assert_eq!(ThemePref::Dark.resolve(WindowAppearance::Light), ThemeMode::Dark);
@@ -217,10 +324,111 @@ mod tests {
     fn monitor_prefs_round_trip() {
         let mut cfg = Config::default();
         let prefs = cfg.monitors.entry("m".into()).or_default();
-        prefs.toggle = Some([0x0F, 0x11]);
+        prefs.endpoints = vec![0x0F, 0x11, 0x12];
+        prefs.local_input = Some(0x11);
         prefs.input_names.insert(0x11, "笔记本".into());
         prefs.input_protocol = serde_json::from_str(r#"{"kind":"lg","values":{"16":210}}"#).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), cfg);
+    }
+
+    #[test]
+    fn old_toggle_pair_becomes_endpoints() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"monitors":{"DEL41A3":{"toggle":[15,17],"input_names":{"17":"台式机","15":"笔记本"}}}}"#,
+        )
+        .unwrap();
+        cfg.migrate();
+        let prefs = &cfg.monitors["DEL41A3"];
+        assert_eq!(prefs.endpoints, vec![15, 17], "order is kept");
+        assert_eq!(prefs.local_input, Some(15));
+        assert_eq!(prefs.label(17), "台式机", "names survive the upgrade");
+        assert_eq!(prefs.label(15), "笔记本");
+        // The legacy key is consumed rather than left behind.
+        assert_eq!(prefs.toggle, None);
+        assert!(!serde_json::to_string(prefs).unwrap().contains("toggle"));
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_keeps_newer_config() {
+        let mut cfg: Config =
+            serde_json::from_str(r#"{"monitors":{"m":{"endpoints":[16,18,17],"toggle":[15,17]}}}"#).unwrap();
+        cfg.migrate();
+        assert_eq!(cfg.monitors["m"].endpoints, vec![16, 18, 17], "configured list wins");
+        // A degenerate old pair must not produce a duplicated endpoint.
+        let mut cfg: Config = serde_json::from_str(r#"{"monitors":{"m":{"toggle":[15,15]}}}"#).unwrap();
+        cfg.migrate();
+        assert_eq!(cfg.monitors["m"].endpoints, vec![15]);
+    }
+
+    #[test]
+    fn labels_fall_back_to_the_mccs_name() {
+        let mut prefs = MonitorPrefs::default();
+        assert_eq!(prefs.label(0x10), "DisplayPort 2");
+        assert!(!prefs.is_named(0x10));
+        prefs.input_names.insert(0x10, "  ".into());
+        assert_eq!(prefs.label(0x10), "DisplayPort 2", "blank names are ignored");
+        prefs.input_names.insert(0x10, "台式机".into());
+        assert_eq!(prefs.label(0x10), "台式机");
+        assert!(prefs.is_named(0x10));
+    }
+
+    #[test]
+    fn moving_an_endpoint_takes_its_name_along() {
+        let mut prefs = MonitorPrefs {
+            endpoints: vec![0x0F, 0x10, 0x11],
+            local_input: Some(0x0F),
+            input_names: BTreeMap::from([(0x0Fu8, "笔记本".to_string()), (0x10u8, "台式机".to_string())]),
+            ..Default::default()
+        };
+        // Onto a free port: the name follows the computer, the local mark too.
+        prefs.move_endpoint(0x0F, 0x12);
+        assert_eq!(prefs.endpoints, vec![0x12, 0x10, 0x11]);
+        assert_eq!(prefs.local_input, Some(0x12));
+        assert_eq!(prefs.label(0x12), "笔记本");
+        assert!(!prefs.is_named(0x0F), "the old port is left clean");
+
+        // Onto an occupied one: the two swap, so no port hosts two computers.
+        prefs.move_endpoint(0x12, 0x10);
+        assert_eq!(prefs.endpoints, vec![0x10, 0x12, 0x11]);
+        assert_eq!(prefs.label(0x10), "笔记本");
+        assert_eq!(prefs.label(0x12), "台式机");
+        assert_eq!(prefs.local_input, Some(0x10));
+
+        // Unknown ports and no-ops leave everything alone.
+        let before = prefs.clone();
+        prefs.move_endpoint(0x99, 0x11);
+        prefs.move_endpoint(0x11, 0x11);
+        assert_eq!(prefs, before);
+    }
+
+    #[test]
+    fn a_portable_copy_drops_what_is_local_to_this_machine() {
+        let prefs = MonitorPrefs {
+            endpoints: vec![0x0F, 0x10],
+            local_input: Some(0x0F),
+            input_names: BTreeMap::from([(0x0Fu8, "笔记本".to_string())]),
+            extra_inputs: vec![0x1B],
+            ..Default::default()
+        };
+        let carried = prefs.portable();
+        assert_eq!(carried.endpoints, prefs.endpoints);
+        assert_eq!(carried.input_names, prefs.input_names);
+        assert_eq!(carried.extra_inputs, vec![0x1B]);
+        assert_eq!(
+            carried.local_input, None,
+            "which port this computer is on cannot travel to another one"
+        );
+
+        // And it has to survive the clipboard round trip intact.
+        let export = SwitchingExport {
+            version: SWITCHING_EXPORT_VERSION,
+            monitors: BTreeMap::from([("27GP950".to_string(), carried)]),
+        };
+        let back: SwitchingExport = serde_json::from_str(&serde_json::to_string(&export).unwrap()).unwrap();
+        assert_eq!(back.version, SWITCHING_EXPORT_VERSION);
+        assert_eq!(back.monitors["27GP950"].endpoints, vec![0x0F, 0x10]);
+        assert_eq!(back.monitors["27GP950"].label(0x0F), "笔记本");
+        assert_eq!(back.monitors["27GP950"].local_input, None);
     }
 }

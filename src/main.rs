@@ -16,7 +16,6 @@ use std::time::Duration;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 
-use crate::breaks::Phase;
 use crate::controller::Controller;
 use crate::platform::Instance;
 use crate::tray::{Command, Hotkey, Tray};
@@ -85,10 +84,11 @@ fn main() {
                     if ticks % 10 == 0
                         && let Some(tray) = &tray
                     {
-                        let c = controller.read(cx);
-                        tray.set_paused(c.is_paused() || !c.config.breaks.enabled);
-                        tray.set_break_active(matches!(c.tracker.phase(), Phase::Prompted { .. }));
-                        tray.set_tooltip(&tooltip(c));
+                        // One derived snapshot drives the whole menu: the label
+                        // of the switch entry, which computer is ticked, and
+                        // whether the break items are live.
+                        let state = controller.read(cx).tray_state();
+                        tray.sync(&state);
                     }
                 });
             }
@@ -100,7 +100,16 @@ fn main() {
 fn run_command(controller: &Entity<Controller>, command: Command, cx: &mut App) {
     match command {
         Command::ShowWindow => controller.update(cx, |c, cx| c.show_main_window(cx)),
-        Command::ToggleInput => controller.update(cx, |c, cx| c.toggle_inputs(cx)),
+        // Two computers can be flipped blind; three or more cannot, so the
+        // hotkey has to ask which one instead of guessing.
+        Command::ToggleInput => controller.update(cx, |c, cx| {
+            if c.needs_picker() {
+                c.open_switch_hud(cx);
+            } else {
+                c.toggle_inputs(cx);
+            }
+        }),
+        Command::SwitchTo(monitor, port) => controller.update(cx, |c, cx| c.switch_input(&monitor, port, cx)),
         Command::BrightnessUp => controller.update(cx, |c, cx| c.nudge_brightness(true, cx)),
         Command::BrightnessDown => controller.update(cx, |c, cx| c.nudge_brightness(false, cx)),
         Command::BreakNow => controller.update(cx, |c, cx| c.break_now(cx)),
@@ -110,16 +119,4 @@ fn run_command(controller: &Entity<Controller>, command: Command, cx: &mut App) 
         // Stats are flushed by the controller's on_app_quit hook.
         Command::Quit => cx.quit(),
     }
-}
-
-fn tooltip(c: &Controller) -> String {
-    let score = c.today_score().map_or("--".to_string(), |s| s.to_string());
-    let state = if !c.config.breaks.enabled {
-        "休息提醒已关闭".to_string()
-    } else if c.is_paused() {
-        "提醒已暂停".to_string()
-    } else {
-        format!("{} 分钟后休息", c.tracker.until_prompt().div_ceil(60))
-    };
-    format!("tarsier · {state} · 今日 {score} 分")
 }

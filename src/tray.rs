@@ -1,21 +1,29 @@
 //! System tray icon and menu, plus global hotkeys. Both create hidden Win32
 //! windows on the calling (main) thread; GPUI's message loop pumps them.
 //! Events are drained by polling from the GPUI foreground executor.
+//!
+//! The menu is rebuilt from a [`TrayState`] the controller derives, and only
+//! when that state actually changes. A monitor shared by several computers
+//! needs the menu to say where each entry goes, which no static menu can do.
 
+use std::cell::RefCell;
 use std::str::FromStr;
 
 use anyhow::Result;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Hotkeys;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     ShowWindow,
+    /// Flip, or ask, depending on how many computers share the monitor.
     ToggleInput,
+    /// Switch one monitor straight to a port.
+    SwitchTo(String, u8),
     BrightnessUp,
     BrightnessDown,
     BreakNow,
@@ -25,75 +33,103 @@ pub enum Command {
     Quit,
 }
 
+/// One computer offered in the switch list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayEndpoint {
+    pub port: u8,
+    pub name: String,
+    /// The monitor is showing this computer right now.
+    pub current: bool,
+}
+
+/// The computers sharing one monitor. Split per monitor so a two-monitor
+/// setup does not merge into one ambiguous list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayGroup {
+    pub monitor: String,
+    pub endpoints: Vec<TrayEndpoint>,
+}
+
+/// Everything the tray shows, derived by the controller. Compared by value so
+/// the native menu is only rebuilt when something visible changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrayState {
+    pub groups: Vec<TrayGroup>,
+    /// With one monitor and exactly two computers the headline can name the
+    /// destination instead of the action.
+    pub headline: Option<String>,
+    pub paused: bool,
+    pub break_active: bool,
+    pub tooltip: String,
+}
+
+impl TrayState {
+    /// Whether the switch list is worth showing at all.
+    fn has_switching(&self) -> bool {
+        self.headline.is_some() || !self.groups.is_empty()
+    }
+
+    /// Everything that changes the menu itself. The tooltip ticks once a
+    /// minute and must not drag a native menu rebuild along with it.
+    fn menu_part(&self) -> (&[TrayGroup], &Option<String>, bool, bool) {
+        (&self.groups, &self.headline, self.paused, self.break_active)
+    }
+}
+
 pub struct Tray {
     icon: TrayIcon,
-    pause_item: MenuItem,
-    /// Only usable while a break reminder is showing.
-    break_items: [MenuItem; 2],
-    items: Vec<(MenuItem, Command)>,
+    /// Menu ids built by the last rebuild, for matching incoming events.
+    built: RefCell<Built>,
+    last: RefCell<Option<TrayState>>,
+}
+
+#[derive(Default)]
+struct Built {
+    commands: Vec<(MenuId, Command)>,
+    switches: Vec<(MenuId, String, u8)>,
 }
 
 impl Tray {
     pub fn new() -> Result<Self> {
-        let open = MenuItem::new("打开 tarsier", true, None);
-        let toggle = MenuItem::new("切换显示器输入", true, None);
-        let break_now = MenuItem::new("现在休息", true, None);
-        let snooze = MenuItem::new("推迟这次休息", false, None);
-        let skip = MenuItem::new("跳过这次休息", false, None);
-        let pause = MenuItem::new("暂停提醒 1 小时", true, None);
-        let quit = MenuItem::new("退出", true, None);
-        let menu = Menu::new();
-        menu.append_items(&[
-            &open,
-            &PredefinedMenuItem::separator(),
-            &toggle,
-            &break_now,
-            &snooze,
-            &skip,
-            &pause,
-            &PredefinedMenuItem::separator(),
-            &quit,
-        ])?;
+        let state = TrayState::default();
+        let (menu, built) = build_menu(&state).map_err(|e| anyhow::anyhow!("building tray menu: {e}"))?;
         let icon = TrayIconBuilder::new()
             .with_tooltip("tarsier")
-            .with_icon(tray_image(false))
+            .with_icon(tray_image(state.paused))
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()?;
-        let items = vec![
-            (open, Command::ShowWindow),
-            (toggle, Command::ToggleInput),
-            (break_now, Command::BreakNow),
-            (snooze.clone(), Command::Snooze),
-            (skip.clone(), Command::Skip),
-            (pause.clone(), Command::TogglePause),
-            (quit, Command::Quit),
-        ];
         Ok(Self {
             icon,
-            pause_item: pause,
-            break_items: [snooze, skip],
-            items,
+            built: RefCell::new(built),
+            last: RefCell::new(None),
         })
     }
 
-    pub fn set_paused(&self, paused: bool) {
-        self.pause_item.set_text(if paused {
-            "恢复提醒"
-        } else {
-            "暂停提醒 1 小时"
-        });
-        let _ = self.icon.set_icon(Some(tray_image(paused)));
-    }
-
-    pub fn set_break_active(&self, active: bool) {
-        for item in &self.break_items {
-            item.set_enabled(active);
+    /// Shows `state`, rebuilding the native menu only when something on it
+    /// actually changed.
+    pub fn sync(&self, state: &TrayState) {
+        let (same_menu, same_tooltip) = match self.last.borrow().as_ref() {
+            Some(last) => (last.menu_part() == state.menu_part(), last.tooltip == state.tooltip),
+            None => (false, false),
+        };
+        if same_menu && same_tooltip {
+            return;
         }
-    }
-
-    pub fn set_tooltip(&self, text: &str) {
-        let _ = self.icon.set_tooltip(Some(text));
+        if !same_tooltip {
+            let _ = self.icon.set_tooltip(Some(state.tooltip.as_str()));
+        }
+        if !same_menu {
+            match build_menu(state) {
+                Ok((menu, built)) => {
+                    let _ = self.icon.set_menu(Some(Box::new(menu)));
+                    *self.built.borrow_mut() = built;
+                }
+                Err(e) => log::error!("rebuilding tray menu: {e}"),
+            }
+            let _ = self.icon.set_icon(Some(tray_image(state.paused)));
+        }
+        *self.last.borrow_mut() = Some(state.clone());
     }
 
     /// Drains pending tray clicks and menu selections.
@@ -110,12 +146,103 @@ impl Tray {
             }
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if let Some((_, cmd)) = self.items.iter().find(|(item, _)| *item.id() == event.id) {
-                commands.push(*cmd);
+            let id = event.id();
+            let built = self.built.borrow();
+            if let Some((_, command)) = built.commands.iter().find(|(item, _)| item == id) {
+                commands.push(command.clone());
+            } else if let Some((_, monitor, port)) = built.switches.iter().find(|(item, _, _)| item == id) {
+                commands.push(Command::SwitchTo(monitor.clone(), *port));
             }
         }
         commands
     }
+}
+
+/// Appends a plain menu item and remembers which command it stands for.
+fn push_item(menu: &Menu, built: &mut Built, id: &str, text: &str, command: Command) -> MenuResult<()> {
+    let item = MenuItem::with_id(id, text, true, None);
+    built.commands.push((item.id().clone(), command));
+    menu.append(&item)
+}
+
+/// Menu errors are muda's own type; callers fold them into `anyhow` or a log.
+type MenuResult<T> = std::result::Result<T, tray_icon::menu::Error>;
+
+fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
+    let mut built = Built::default();
+    let menu = Menu::new();
+
+    push_item(&menu, &mut built, "open", "打开 tarsier", Command::ShowWindow)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    if !state.has_switching() {
+        push_item(
+            &menu,
+            &mut built,
+            "switch-setup",
+            "设置显示器输入…",
+            Command::ShowWindow,
+        )?;
+    } else {
+        // The headline carries the destination when there is exactly one, so
+        // the menu answers "where will this put me" at a glance rather than
+        // naming an action and leaving the user to work it out.
+        let text = state
+            .headline
+            .clone()
+            .unwrap_or_else(|| "⇄ 切换显示器输入…".to_string());
+        push_item(&menu, &mut built, "switch", &text, Command::ToggleInput)?;
+
+        // The explicit list lives one level down, so the everyday menu stays
+        // the same height whether a monitor is shared by two computers or by
+        // five. It also doubles as the place that shows which one is live.
+        let picker = Submenu::new("显示器输入", true);
+        for group in &state.groups {
+            if state.groups.len() > 1 {
+                picker.append(&PredefinedMenuItem::separator())?;
+                // A disabled item is how the platform draws a section header.
+                picker.append(&MenuItem::new(group.monitor.clone(), false, None))?;
+            }
+            for endpoint in &group.endpoints {
+                let id = MenuId::new(format!("go:{}:{}", group.monitor, endpoint.port));
+                let label = format!(
+                    "{}  ·  {}",
+                    endpoint.name,
+                    crate::display::mccs::input_source_name(endpoint.port)
+                );
+                let check = CheckMenuItem::with_id(id.clone(), label, true, endpoint.current, None);
+                picker.append(&check)?;
+                built.switches.push((id, group.monitor.clone(), endpoint.port));
+            }
+        }
+        menu.append(&picker)?;
+    }
+
+    menu.append(&PredefinedMenuItem::separator())?;
+    push_item(&menu, &mut built, "break-now", "现在休息", Command::BreakNow)?;
+    for (id, text, command) in [
+        ("snooze", "推迟这次休息", Command::Snooze),
+        ("skip", "跳过这次休息", Command::Skip),
+    ] {
+        let item = MenuItem::with_id(id, text, state.break_active, None);
+        built.commands.push((item.id().clone(), command));
+        menu.append(&item)?;
+    }
+    push_item(
+        &menu,
+        &mut built,
+        "pause",
+        if state.paused {
+            "恢复提醒"
+        } else {
+            "暂停提醒 1 小时"
+        },
+        Command::TogglePause,
+    )?;
+    menu.append(&PredefinedMenuItem::separator())?;
+    push_item(&menu, &mut built, "quit", "退出", Command::Quit)?;
+
+    Ok((menu, built))
 }
 
 pub struct Hotkey {
@@ -159,7 +286,7 @@ impl Hotkey {
             if event.state() == HotKeyState::Pressed
                 && let Some((_, cmd)) = self.bindings.iter().find(|(id, _)| *id == event.id())
             {
-                commands.push(*cmd);
+                commands.push(cmd.clone());
             }
         }
         commands
@@ -199,4 +326,108 @@ fn tray_image(paused: bool) -> Icon {
         }
     }
     Icon::from_rgba(rgba, N as u32, N as u32).expect("valid tray icon")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn endpoint(port: u8, name: &str, current: bool) -> TrayEndpoint {
+        TrayEndpoint {
+            port,
+            name: name.to_string(),
+            current,
+        }
+    }
+
+    fn submenu_count(menu: &Menu) -> usize {
+        menu.items()
+            .into_iter()
+            .filter(|item| matches!(item, tray_icon::menu::MenuItemKind::Submenu(_)))
+            .count()
+    }
+
+    #[test]
+    fn a_shared_monitor_gets_a_headline_and_a_checked_submenu() {
+        let state = TrayState {
+            groups: vec![TrayGroup {
+                monitor: "27GP950".to_string(),
+                endpoints: vec![endpoint(0x10, "MacBook Pro", true), endpoint(0x12, "台式机", false)],
+            }],
+            headline: Some("⇄ 切换到 台式机".to_string()),
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (menu, built) = build_menu(&state).unwrap();
+
+        // Every computer is reachable from the menu, and each is wired to a
+        // command that names its own monitor and port.
+        assert_eq!(built.switches.len(), 2);
+        assert_eq!(built.switches[0].1, "27GP950");
+        assert_eq!(built.switches[0].2, 0x10);
+        assert_eq!(built.switches[1].2, 0x12);
+        // The headline flips; the submenu picks explicitly.
+        assert!(built.commands.iter().any(|(_, c)| *c == Command::ToggleInput));
+        // The list is nested, so the everyday menu does not grow with the
+        // number of computers sharing the monitor.
+        assert_eq!(submenu_count(&menu), 1);
+    }
+
+    #[test]
+    fn three_computers_are_all_listed_without_a_headline() {
+        let state = TrayState {
+            groups: vec![TrayGroup {
+                monitor: "27GP950".to_string(),
+                endpoints: vec![
+                    endpoint(0x10, "MacBook Pro", true),
+                    endpoint(0x12, "台式机", false),
+                    endpoint(0x11, "游戏机", false),
+                ],
+            }],
+            headline: None,
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (menu, built) = build_menu(&state).unwrap();
+        assert_eq!(built.switches.len(), 3);
+        assert_eq!(submenu_count(&menu), 1);
+    }
+
+    #[test]
+    fn a_monitor_with_nothing_configured_offers_setup_instead() {
+        let state = TrayState {
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (menu, built) = build_menu(&state).unwrap();
+        assert!(built.switches.is_empty(), "nothing to switch to");
+        assert_eq!(submenu_count(&menu), 0, "no empty submenu");
+        assert!(built.commands.iter().any(|(_, c)| *c == Command::ShowWindow));
+    }
+
+    #[test]
+    fn every_menu_id_is_unique_so_events_cannot_go_astray() {
+        let state = TrayState {
+            groups: vec![
+                TrayGroup {
+                    monitor: "A".to_string(),
+                    endpoints: vec![endpoint(0x11, "笔记本", true), endpoint(0x12, "台式机", false)],
+                },
+                TrayGroup {
+                    monitor: "B".to_string(),
+                    endpoints: vec![endpoint(0x11, "游戏机", true), endpoint(0x0F, "NAS", false)],
+                },
+            ],
+            headline: None,
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (_menu, built) = build_menu(&state).unwrap();
+        let mut ids: Vec<&MenuId> = built.switches.iter().map(|(id, ..)| id).collect();
+        let before = ids.len();
+        ids.sort();
+        ids.dedup();
+        // Two monitors both use port 0x11; the ids must still differ.
+        assert_eq!(ids.len(), before, "menu ids collide across monitors");
+    }
 }

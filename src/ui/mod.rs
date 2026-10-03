@@ -1,6 +1,7 @@
 pub mod break_overlay;
 pub mod main_window;
 mod number_field;
+pub mod switch_hud;
 
 use std::borrow::Cow;
 

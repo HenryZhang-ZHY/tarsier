@@ -16,15 +16,28 @@ use windows::Win32::UI::Shell::{
     QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
 use windows::core::w;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "tarsier";
 pub const BACKGROUND_ARG: &str = "--background";
+
+/// This computer's own name, used as the default label for the machine the
+/// user is sitting at. There is no way to learn what the *other* computers on a
+/// shared monitor are called — a monitor only reports input numbers — so this
+/// is the one endpoint name that never has to be typed.
+pub fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .map(|name| name.trim().to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "本机".to_string())
+}
 
 /// Seconds since the last keyboard or mouse input in this session.
 pub fn idle_secs() -> u64 {
@@ -50,6 +63,23 @@ pub fn user_is_busy() -> bool {
             .map(|s| matches!(s, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE))
             .unwrap_or(false)
     }
+}
+
+/// The window the user is currently working in.
+///
+/// A transient panel has to take focus to receive Esc and the number keys;
+/// remembering this first lets it hand focus straight back when it closes, so
+/// pressing the hotkey and changing your mind costs nothing.
+pub fn foreground_window() -> Option<isize> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    (!hwnd.is_invalid()).then(|| hwnd.0 as isize)
+}
+
+/// Gives focus back to a window remembered by [`foreground_window`]. Windows
+/// only honours this for a window that was foreground recently, which is
+/// exactly the case for a panel that lived a few seconds.
+pub fn restore_foreground(hwnd: isize) {
+    let _ = unsafe { SetForegroundWindow(HWND(hwnd as _)) };
 }
 
 /// Turns a window into a Fadetop-style overlay: mouse clicks fall through to

@@ -9,7 +9,7 @@ It lives in the tray, draws its own title bar, and supports light, dark, and fol
 ## Features
 
 - **Brightness / contrast**: adjust external monitors directly over DDC/CI.
-- **One-key input switching**: pick two inputs per monitor and flip between them with a hotkey or the tray menu. Monitors that ignore the standard command (recent LGs, for instance) fall back to a vendor-private channel automatically.
+- **One-key input switching**: list the computers sharing each monitor and switch with a hotkey or the tray menu. Two computers flip blind; three or more ask which one first. Monitors that ignore the standard command (recent LGs, for instance) fall back to a vendor-private channel automatically.
 - **Break reminders**: after a stretch of work, a translucent overlay fades in across every screen, Fadetop-style. It never steals focus and clicks pass straight through. The countdown only runs while you are actually away from the keyboard and mouse.
 - **Scoring**: every work session is scored by length, with points, titles, and a streak of good days.
 
@@ -23,7 +23,7 @@ It stays in the tray; double-click the tray icon to open the main window.
 
 | Hotkey | Action |
 | --- | --- |
-| `Ctrl+Alt+I` | Toggle between the A / B inputs |
+| `Ctrl+Alt+I` | Switch monitor input. Two computers: a blind flip. Three or more: a quick-switch panel, jump by number |
 | `Ctrl+Alt+PageUp` / `PageDown` | Brightness ±10% on every monitor |
 
 Hotkeys, break durations, and everything else live on the Settings tab of the main window, or in `%APPDATA%\tarsier\config.json`.
