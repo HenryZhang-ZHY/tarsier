@@ -156,6 +156,36 @@ fn hotkey_caps(spec: &str, cx: &App) -> impl IntoElement {
         }))
 }
 
+/// What the first-run wizard should open on for one monitor, or `None` once it
+/// has been through setup.
+///
+/// A monitor that reports exactly two inputs already says which ports are in
+/// play, so there is nothing to tick and the flow opens straight on naming.
+/// Anything else starts by asking which ports actually have a computer behind
+/// them — a monitor reporting four inputs is not four computers.
+///
+/// Getting this wrong is not cosmetic: the setup screen is the only place the
+/// import shortcut lives, so a monitor that never reaches it has no way to
+/// receive another computer's names.
+///
+/// The test is `== 2`, not `>= 2`, so this stays correct on its own rather than
+/// relying on callers never passing a longer list.
+fn wizard_seed(configured: bool, known: &[u8], current: Option<u8>) -> Option<Setup> {
+    if configured {
+        return None;
+    }
+    let pair_known = known.len() == 2;
+    Some(Setup {
+        chosen: if pair_known {
+            known.to_vec()
+        } else {
+            current.into_iter().collect()
+        },
+        naming: pair_known,
+        local: current,
+    })
+}
+
 /// Identity of one endpoint row.
 fn endpoint_key(monitor_id: &str, port: u8) -> String {
     format!("{monitor_id}@{port:#04X}")
@@ -279,6 +309,28 @@ impl MainWindow {
     /// One editable name per configured endpoint, created on demand so typing
     /// is never interrupted by a repaint, plus the first-run wizard state.
     fn sync_endpoints(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Decide the wizard state first. The name fields below depend on it,
+        // and a monitor that reports exactly two inputs opens on the naming
+        // step straight away, so those fields have to exist on the first paint
+        // rather than appearing a second later.
+        let (seed, configured): (Vec<(String, Setup)>, Vec<String>) = {
+            let c = self.controller.read(cx);
+            c.monitors.iter().fold((Vec::new(), Vec::new()), |mut acc, m| {
+                let id = m.id().to_string();
+                match wizard_seed(c.endpoints_configured(m), &c.endpoints(m), m.current_input) {
+                    Some(setup) => acc.0.push((id, setup)),
+                    None => acc.1.push(id),
+                }
+                acc
+            })
+        };
+        for id in configured {
+            self.setup.remove(&id);
+        }
+        for (id, setup) in seed {
+            self.setup.entry(id).or_insert(setup);
+        }
+
         // Ports the wizard has ticked but not yet committed. They need name
         // fields too, or the naming step would render empty rows.
         let pending: Vec<(String, Vec<u8>, Option<u8>)> = self
@@ -348,32 +400,6 @@ impl MainWindow {
             });
             self._subscriptions.push(sub);
             self.names.insert(key, state);
-        }
-
-        // Seed the wizard for monitors with no endpoint list yet, and drop it
-        // once a monitor is configured.
-        let (unconfigured, configured): (Vec<(String, Option<u8>)>, Vec<String>) = {
-            let c = self.controller.read(cx);
-            c.monitors.iter().fold((Vec::new(), Vec::new()), |mut acc, m| {
-                let id = m.id().to_string();
-                let current = m.current_input;
-                if c.endpoints(m).is_empty() {
-                    acc.0.push((id, current));
-                } else {
-                    acc.1.push(id);
-                }
-                acc
-            })
-        };
-        for id in configured {
-            self.setup.remove(&id);
-        }
-        for (id, current) in unconfigured {
-            self.setup.entry(id).or_insert_with(|| Setup {
-                chosen: current.into_iter().collect(),
-                naming: false,
-                local: current,
-            });
         }
     }
 
@@ -788,6 +814,22 @@ impl MainWindow {
                                 this.setup.remove(&id);
                                 cx.notify();
                             })),
+                    )
+                    .child(
+                        // The same shortcut as the first step, because a
+                        // monitor that reports exactly two inputs opens here:
+                        // a machine that is already set up can just hand the
+                        // names over instead of them being typed again.
+                        Button::new(SharedString::from(format!("wizard-paste2-{idx}")))
+                            .outline()
+                            .label("从另一台电脑粘贴")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let text = cx
+                                    .read_from_clipboard()
+                                    .and_then(|item| item.text())
+                                    .unwrap_or_default();
+                                this.controller.update(cx, |c, cx| c.import_switching(&text, cx));
+                            })),
                     ),
             )
             .into_any_element()
@@ -993,40 +1035,20 @@ impl MainWindow {
                     .child(hotkey_caps(&hotkey, cx)),
             )
             .children(rows)
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child({
-                        let id = id.clone();
-                        let free = inputs.iter().copied().find(|p| !endpoints.contains(p));
-                        Button::new(SharedString::from(format!("add-{idx}")))
-                            .xsmall()
-                            .ghost()
-                            .label("+ 添加电脑")
-                            .disabled(free.is_none())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(port) = free {
-                                    this.controller.update(cx, |c, cx| c.add_endpoint(&id, port, cx));
-                                }
-                            }))
-                    })
-                    .child(
-                        // Names belong to the monitor, so one machine's setup
-                        // can be carried to the others.
-                        Button::new(SharedString::from(format!("copy-{idx}")))
-                            .xsmall()
-                            .ghost()
-                            .label("复制到别的电脑")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let text = this.controller.read(cx).export_switching();
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                this.controller.update(cx, |c, cx| {
-                                    c.notice = Some("已复制。在另一台电脑上点「从另一台电脑粘贴」。".into());
-                                    cx.notify();
-                                });
-                            })),
-                    ),
-            )
+            .child({
+                let id = id.clone();
+                let free = inputs.iter().copied().find(|p| !endpoints.contains(p));
+                Button::new(SharedString::from(format!("add-{idx}")))
+                    .xsmall()
+                    .ghost()
+                    .label("+ 添加电脑")
+                    .disabled(free.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(port) = free {
+                            this.controller.update(cx, |c, cx| c.add_endpoint(&id, port, cx));
+                        }
+                    }))
+            })
             .child(action)
             .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
             .when(!m.inputs_reported(), |el| {
@@ -1416,6 +1438,54 @@ impl MainWindow {
                     value.to_string()
                 }))
         };
+        // Moving the setup to another computer is a whole-app action, not a
+        // per-monitor one, so it lives here rather than inside a monitor card.
+        let switching_card = {
+            let export = self.controller.clone();
+            let import = self.controller.clone();
+            card(cx)
+                .gap_2()
+                .child(section_label("输入切换设置", cx))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(
+                    "「接口 → 电脑名」跟着显示器走，所以在哪台电脑上填都一样。在一台上填好，把它搬到其余几台，就不用再填一遍。",
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("export-switching")
+                                .small()
+                                .outline()
+                                .icon(Icon::new(Lucide::Copy))
+                                .label("复制设置")
+                                .on_click(move |_, _, cx| {
+                                    let text = export.read(cx).export_switching();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    export.update(cx, |c, cx| {
+                                        c.notice =
+                                            Some("已复制。在另一台电脑上点「导入设置」。".into());
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("import-switching")
+                                .small()
+                                .outline()
+                                .label("导入设置")
+                                .on_click(move |_, _, cx| {
+                                    let text = cx
+                                        .read_from_clipboard()
+                                        .and_then(|item| item.text())
+                                        .unwrap_or_default();
+                                    import.update(cx, |c, cx| {
+                                        c.import_switching(&text, cx);
+                                    });
+                                }),
+                        ),
+                )
+        };
+
         let hotkey_card = card(cx)
             .gap_2()
             .child(section_label("全局快捷键（修改配置文件后重启生效）", cx))
@@ -1446,6 +1516,7 @@ impl MainWindow {
             .gap_4()
             .child(general)
             .child(breaks)
+            .child(switching_card)
             .child(hotkey_card)
             .child(
                 div()
@@ -1638,5 +1709,54 @@ fn score_color(score: Option<u8>, cx: &App) -> Hsla {
         Some(s) if s >= 50 => theme.warning,
         Some(_) => theme.danger,
         None => theme.muted_foreground,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Deliberately not `use super::*`: that would pull in GPUI's own `test`
+    // attribute macro, which shadows the built-in one and recurses.
+    use super::{Setup, wizard_seed};
+
+    #[test]
+    fn a_two_input_monitor_opens_on_naming_not_on_picking() {
+        // The monitor already reports which ports are in play, so there is
+        // nothing to tick. Opening on the picking step instead would strand
+        // the user away from the import shortcut, which lives in this flow.
+        let seed = wizard_seed(false, &[0x10, 0x12], Some(0x10)).expect("unconfigured");
+        assert!(seed.naming, "goes straight to naming");
+        assert_eq!(seed.chosen, vec![0x10, 0x12]);
+        assert_eq!(seed.local, Some(0x10));
+    }
+
+    #[test]
+    fn a_monitor_that_reports_more_ports_starts_by_asking() {
+        // Four inputs is not four computers; the user has to say which ones
+        // are real, and only the live one can be assumed to be this machine.
+        let seed = wizard_seed(false, &[0x0F, 0x10, 0x11, 0x12], Some(0x10)).expect("unconfigured");
+        assert!(!seed.naming, "starts on the picking step");
+        assert_eq!(seed.chosen, vec![0x10], "only the current input is assumed");
+        assert_eq!(seed.local, Some(0x10));
+
+        // Nothing reported at all, and nothing readable: still has to ask.
+        let seed = wizard_seed(false, &[], None).expect("unconfigured");
+        assert!(!seed.naming);
+        assert!(seed.chosen.is_empty());
+    }
+
+    #[test]
+    fn a_configured_monitor_gets_no_wizard() {
+        assert!(wizard_seed(true, &[0x10, 0x12], Some(0x10)).is_none());
+        assert!(wizard_seed(true, &[], None).is_none());
+    }
+
+    #[test]
+    fn a_single_reported_port_is_not_enough_to_skip_picking() {
+        // One port cannot be a toggle, so this is not the two-computer case
+        // and the name fields would have nothing to name.
+        let seed = wizard_seed(false, &[0x10], Some(0x10)).expect("unconfigured");
+        assert!(!seed.naming);
+        let Setup { chosen, .. } = seed;
+        assert_eq!(chosen, vec![0x10]);
     }
 }
