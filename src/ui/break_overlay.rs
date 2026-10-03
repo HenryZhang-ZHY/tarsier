@@ -12,6 +12,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::breaks::RESTING_IDLE;
 use crate::controller::Controller;
+use crate::i18n::{tr, translate};
 use crate::platform;
 use crate::ui::format_clock;
 
@@ -20,13 +21,15 @@ pub const FADE_OUT: Duration = Duration::from_millis(900);
 /// Darkness of the layer once fully faded in; light enough to keep working.
 const MAX_DIM: f32 = 0.72;
 
+/// English is the source language, so the tips are written in it and
+/// translated where they are drawn — a `const` cannot look anything up.
 const TIPS: &[&str] = &[
-    "看看 6 米外的地方，让眼睛的睫状肌放松一下",
-    "站起来伸个懒腰，转转脖子和肩膀",
-    "去倒杯水，顺便走动走动",
-    "闭上眼睛，深呼吸几次",
-    "眨眨眼，让眼睛重新湿润起来",
-    "活动一下手腕和手指",
+    "Look at something 6 metres away and let your eyes relax",
+    "Stand up, stretch, and roll your neck and shoulders",
+    "Fetch a glass of water and walk around a little",
+    "Close your eyes and take a few slow breaths",
+    "Blink a few times to wet your eyes again",
+    "Move your wrists and fingers around",
 ];
 
 pub struct BreakOverlay {
@@ -110,12 +113,17 @@ impl Render for BreakOverlay {
                         div()
                             .text_size(px(34.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("休息一下吧"),
+                            .child(tr!("Take a break")),
                     )
                     .child(div().text_color(dim).child(if worked > 0 {
-                        format!("你已经连续工作了 {worked} 分钟。{}", self.tip)
+                        tr!(
+                            n = worked,
+                            "You have been working for 1 minute. {tip}"
+                                | "You have been working for {n} minutes. {tip}",
+                            tip = translate(self.tip)
+                        )
                     } else {
-                        self.tip.to_string()
+                        translate(self.tip).to_string()
                     }))
                     .child(
                         div()
@@ -134,17 +142,13 @@ impl Render for BreakOverlay {
                             ),
                     )
                     .child(div().text_color(dim).child(if resting {
-                        "放松中…离开键盘鼠标，倒计时会自动走完"
+                        tr!("Relaxing… the countdown runs while you are away from the keyboard and mouse")
                     } else {
-                        "检测到键鼠操作，倒计时已暂停"
+                        tr!("Keyboard or mouse activity detected — the countdown is paused")
                     }))
-                    .child(
-                        div()
-                            .mt_6()
-                            .text_sm()
-                            .text_color(faint)
-                            .child("遮罩不会挡住操作 · 需要推迟或跳过，请右键托盘里的 tarsier"),
-                    ),
+                    .child(div().mt_6().text_sm().text_color(faint).child(tr!(
+                        "The overlay does not block input · to snooze or skip, right-click tarsier in the tray"
+                    ))),
             )
     }
 }

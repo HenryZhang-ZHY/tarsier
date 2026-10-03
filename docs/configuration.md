@@ -39,6 +39,10 @@ How much brightness a hotkey press changes, in percent. Defaults to `10`.
 
 Developer mode, also switchable from the UI. See [Developer mode](developer-mode.md).
 
+### `language`
+
+`"en"` (the default) or `"zh"`, also switchable from the UI. Every window and the tray menu are drawn in it. English is the source language, so a string with no Chinese translation shows up in English rather than as a missing label.
+
 ### `breaks`
 
 ```json
@@ -128,6 +132,7 @@ Background: [Vendor-private channels](private-channels.md).
   },
   "brightness_step": 10,
   "developer_mode": false,
+  "language": "en",
   "breaks": {
     "enabled": true,
     "work_minutes": 50,

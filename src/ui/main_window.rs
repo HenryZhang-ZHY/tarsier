@@ -20,6 +20,7 @@ use crate::config;
 use crate::controller::{Controller, MonitorEntry, local_date, now_ts};
 use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
+use crate::i18n::{tr, translate};
 use crate::platform;
 use crate::stats::{self, GOOD_SCORE};
 use crate::ui::format_minutes;
@@ -60,7 +61,7 @@ type BreakField = (
 const BREAK_FIELDS: [BreakField; 3] = [
     (
         "work",
-        "每工作",
+        "Work",
         Range {
             min: 10,
             max: 180,
@@ -71,7 +72,7 @@ const BREAK_FIELDS: [BreakField; 3] = [
     ),
     (
         "rest",
-        "休息",
+        "Break",
         Range {
             min: 1,
             max: 30,
@@ -82,7 +83,7 @@ const BREAK_FIELDS: [BreakField; 3] = [
     ),
     (
         "snooze",
-        "推迟",
+        "Snooze",
         Range {
             min: 1,
             max: 30,
@@ -120,7 +121,9 @@ struct Setup {
 }
 
 /// One-tap names offered while setting up, so the common case needs no typing.
-const NAME_SUGGESTIONS: [&str; 4] = ["台式机", "公司电脑", "笔记本", "游戏机"];
+/// Written into the config as the computer's name, in the language it is shown
+/// in, so each one is translated where it is drawn.
+const NAME_SUGGESTIONS: [&str; 4] = ["Desktop", "Work PC", "Laptop", "Console"];
 
 /// A monitor shared by several computers needs to tell them apart at a glance
 /// in three places at once (list, tray, quick-switch panel), so each endpoint
@@ -130,8 +133,8 @@ fn endpoint_color(index: usize) -> Hsla {
     hsla(HUES[index % HUES.len()], 0.72, 0.55, 1.0)
 }
 
-/// A small pill: "本机" on the computer you are sitting at, "正在显示" on the
-/// one the monitor is showing right now.
+/// A small pill: "This PC" on the computer you are sitting at, and a monitor's
+/// own name where it has to say which one a port is showing.
 fn mark(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
     div()
         .px_2()
@@ -212,7 +215,7 @@ impl MainWindow {
             cx.notify();
         });
         // Windows fires an appearance change when the user flips the system
-        // theme; re-resolve so "跟随系统" tracks it without a restart. An
+        // theme; re-resolve so "System" tracks it without a restart. An
         // explicit light/dark choice resolves to the same mode and costs a
         // repaint.
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
@@ -428,7 +431,11 @@ impl MainWindow {
                 .ghost()
                 .small()
                 .icon(Icon::new(Lucide::RefreshCw))
-                .label(if c.scanning { "正在检测…" } else { "重新检测" })
+                .label(if c.scanning {
+                    tr!("Scanning…")
+                } else {
+                    tr!("Scan again")
+                })
                 .loading(c.scanning)
                 .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.refresh_monitors(cx)))
         };
@@ -440,8 +447,11 @@ impl MainWindow {
                     .text_color(theme.muted_foreground)
                     .text_sm()
                     .child(match c.monitors.len() {
-                        0 => "未检测到显示器".to_string(),
-                        n => format!("已连接 {n} 台支持 DDC/CI 的显示器"),
+                        0 => tr!("No monitors detected").to_string(),
+                        n => tr!(
+                            n = n,
+                            "Connected to 1 DDC/CI monitor" | "Connected to {n} DDC/CI monitors"
+                        ),
                     }),
             )
             .child(
@@ -454,12 +464,12 @@ impl MainWindow {
                                 .ghost()
                                 .small()
                                 .icon(Icon::new(Lucide::Copy))
-                                .label("复制诊断报告")
+                                .label(tr!("Copy diagnostics report"))
                                 .on_click(move |_, _, cx| {
                                     let report = controller.read(cx).diagnostics_report();
                                     cx.write_to_clipboard(ClipboardItem::new_string(report));
                                     controller.update(cx, |c, cx| {
-                                        c.notice = Some("诊断报告已复制到剪贴板".into());
+                                        c.notice = Some(tr!("Diagnostics report copied to the clipboard").into());
                                         cx.notify();
                                     });
                                 }),
@@ -476,10 +486,10 @@ impl MainWindow {
                     .gap_2()
                     .py_8()
                     .child(Icon::new(Lucide::Monitor).size(px(32.)))
-                    .child("没有找到支持 DDC/CI 的外接显示器")
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        "请在显示器的 OSD 菜单里开启 DDC/CI，然后点击「重新检测」。笔记本内置屏不支持 DDC/CI。",
-                    )),
+                    .child(tr!("No external monitors supporting DDC/CI were found"))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(tr!(
+                        "Turn on DDC/CI in the monitor's on-screen menu, then click \"Scan again\". Built-in laptop screens do not support DDC/CI."
+                    ))),
             );
         }
         for (idx, m) in c.monitors.iter().enumerate() {
@@ -504,7 +514,12 @@ impl MainWindow {
                         .get(&feature_key(&id, code))
                         .map(|f| div().w(px(104.)).child(f.input())),
                 ),
-                None => row.child(div().text_sm().text_color(theme.muted_foreground).child("不支持")),
+                None => row.child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("Not supported")),
+                ),
             }
         };
 
@@ -524,8 +539,8 @@ impl MainWindow {
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(m.dev.name.clone()))
                     .children(model.map(|model| div().text_sm().text_color(theme.muted_foreground).child(model))),
             )
-            .child(feature_row(VCP_BRIGHTNESS, "亮度", Lucide::Sun))
-            .child(feature_row(VCP_CONTRAST, "对比度", Lucide::Contrast))
+            .child(feature_row(VCP_BRIGHTNESS, tr!("Brightness"), Lucide::Sun))
+            .child(feature_row(VCP_CONTRAST, tr!("Contrast"), Lucide::Contrast))
             .child(self.render_switching(idx, m, c, cx))
             .when(c.config.developer_mode, |el| el.child(render_diagnostics(m, cx)))
     }
@@ -552,9 +567,9 @@ impl MainWindow {
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .child(if endpoints.len() == 2 {
-                        "一键切换"
+                        tr!("One-key switching")
                     } else {
-                        "输入切换"
+                        tr!("Input switching")
                     }),
             )
             .child(div().flex_1())
@@ -573,13 +588,13 @@ impl MainWindow {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("还没设置共用这台显示器的电脑。"),
+                        .child(tr!("No computers sharing this monitor are set up yet.")),
                 )
                 .child(
                     Button::new(SharedString::from(format!("configure-{idx}")))
                         .small()
                         .outline()
-                        .label("去设置里配置")
+                        .label(tr!("Set up on the Settings tab"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.tab = Tab::Settings;
                             cx.notify();
@@ -616,14 +631,19 @@ impl MainWindow {
                 )
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name.clone()))
                 .when(here, |el| {
-                    el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
+                    el.child(mark(
+                        tr!("This PC"),
+                        theme.muted_foreground,
+                        theme.background,
+                        theme.border,
+                    ))
                 })
                 .child(div().flex_1())
                 .child(
                     Button::new(SharedString::from(format!("go-{idx}-{ix}")))
                         .small()
                         .outline()
-                        .label(format!("切换到 {name}"))
+                        .label(tr!("Switch to {name}", name = name))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
                         })),
@@ -631,9 +651,11 @@ impl MainWindow {
         });
 
         let hint = if n == 2 {
-            "按快捷键在两台之间来回切，不用先看现在在哪台。"
+            tr!("Press the hotkey to flip between the two, without looking up which one you are on first.")
         } else {
-            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。"
+            tr!(
+                "Press the hotkey for the quick-switch panel and jump by number — it never passes through the machine in between."
+            )
         };
 
         v_flex()
@@ -656,13 +678,13 @@ impl MainWindow {
                             div()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
-                                .child("这些接口还没有名字。"),
+                                .child(tr!("These ports have no names yet.")),
                         )
                         .child(
                             Button::new(SharedString::from(format!("name-{idx}")))
                                 .xsmall()
                                 .ghost()
-                                .label("去设置里起名")
+                                .label(tr!("Name them on the Settings tab"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.tab = Tab::Settings;
                                     cx.notify();
@@ -675,7 +697,7 @@ impl MainWindow {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。"),
+                        .child(tr!("The monitor does not report its input list, so these are the common ports; add more under extra_inputs in the config.")),
                 )
             })
             .into_any_element()
@@ -729,7 +751,7 @@ impl MainWindow {
                             })),
                     )
                     .when(here, |el| {
-                        el.child(div().text_xs().text_color(theme.muted_foreground).child("本机"))
+                        el.child(div().text_xs().text_color(theme.muted_foreground).child(tr!("This PC")))
                     })
             });
             let count = setup.chosen.len();
@@ -738,12 +760,15 @@ impl MainWindow {
                 .p_3()
                 .rounded_md()
                 .bg(theme.muted)
-                .child(header(Lucide::ArrowLeftRight, "这台显示器上接着几台电脑？"))
+                .child(header(
+                    Lucide::ArrowLeftRight,
+                    tr!("How many computers are connected to this monitor?"),
+                ))
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("把真正接着电脑的口点亮。空着的口、接游戏机或电视盒子的口，都可以不选。"),
+                        .child(tr!("Select the ports that actually have a computer behind them. Ports that are empty, or that go to a game console or a TV box, can stay unselected.")),
                 )
                 .child(h_flex().gap_2().flex_wrap().children(chips))
                 .child(
@@ -753,11 +778,11 @@ impl MainWindow {
                         .child(match m.current_input {
                             // Only a starting point, read once when the monitor was
                             // enumerated — not a live claim about where it is now.
-                            Some(port) => format!(
-                                "默认把「{}」算作这台电脑，不对的话点一下换个口。",
-                                mccs::input_source_name(port)
+                            Some(port) => tr!(
+                                "Assuming {port} is this computer — click another port if that is wrong",
+                                port = mccs::input_source_name(port)
                             ),
-                            None => "显示器没有上报输入，自己点一下哪个口是这台电脑就行。".to_string(),
+                            None => tr!("The monitor reports no inputs, so click whichever port this computer is on").to_string(),
                         }),
                 )
                 .child(
@@ -767,9 +792,12 @@ impl MainWindow {
                             Button::new(SharedString::from(format!("wizard-next-{idx}")))
                                 .primary()
                                 .label(if count >= 2 {
-                                    format!("下一步：给这 {count} 台起名")
+                                    tr!(
+                                        n = count,
+                                        "Next: name this 1 computer" | "Next: name these {n} computers"
+                                    )
                                 } else {
-                                    "至少选两台才能一键切换".to_string()
+                                    tr!("Pick at least two to switch with one key").to_string()
                                 })
                                 .disabled(count < 2)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -784,7 +812,7 @@ impl MainWindow {
                             // has already been set up can hand them over.
                             Button::new(SharedString::from(format!("wizard-paste-{idx}")))
                                 .outline()
-                                .label("从另一台电脑粘贴")
+                                .label(tr!("Paste from another computer"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let text = cx
                                         .read_from_clipboard()
@@ -805,7 +833,9 @@ impl MainWindow {
             let suggestions = NAME_SUGGESTIONS.iter().map(|name| {
                 let id = id.clone();
                 let key = key.clone();
-                let name = SharedString::from(*name);
+                // The label is also the name written to the config, so both
+                // sides of the comparison come from the same translation.
+                let name = SharedString::from(translate(*name));
                 let label = name.clone();
                 let picked = self
                     .names
@@ -880,7 +910,7 @@ impl MainWindow {
                                     .border_color(theme.border)
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("本机"),
+                                    .child(tr!("This PC")),
                             )
                         }),
                 )
@@ -892,21 +922,21 @@ impl MainWindow {
             .p_3()
             .rounded_md()
             .bg(theme.muted)
-            .child(header(Lucide::Laptop, "给它们起个名字"))
+            .child(header(Lucide::Laptop, tr!("Give them names")))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("名字会出现在这里、托盘菜单和快切面板上 —— 这是唯一能让你一眼认出谁是谁的东西。"),
+                    .child(tr!("The names appear here, in the tray menu, and in the quick-switch panel — they are the only thing that lets you tell the machines apart at a glance.")),
             )
             .children(rows)
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "这台电脑的名字自动取系统里的「{}」，其余的点一下常用名就行。另一台电脑上也装一份 tarsier，把这套名字粘过去，第 3、第 4 台就都不用再填了。",
-                        platform::local_hostname()
+                    .child(tr!(
+                        "This computer takes its name from the system ({hostname}); for the rest, click a common name. Install tarsier on the other computers too and paste this set of names across, and the 3rd and 4th need no typing at all.",
+                        hostname = platform::local_hostname()
                     )),
             )
             .child(
@@ -915,7 +945,7 @@ impl MainWindow {
                     .child(
                         Button::new(SharedString::from(format!("wizard-back-{idx}")))
                             .outline()
-                            .label("上一步")
+                            .label(tr!("Back"))
                             .on_click(cx.listener({
                                 let id = id.clone();
                                 move |this, _, _, cx| {
@@ -929,7 +959,7 @@ impl MainWindow {
                     .child(
                         Button::new(SharedString::from(format!("wizard-done-{idx}")))
                             .primary()
-                            .label("完成")
+                            .label(tr!("Done"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(setup) = this.setup.get(&id).cloned() else {
                                     return;
@@ -968,7 +998,7 @@ impl MainWindow {
                         // names over instead of them being typed again.
                         Button::new(SharedString::from(format!("wizard-paste2-{idx}")))
                             .outline()
-                            .label("从另一台电脑粘贴")
+                            .label(tr!("Paste from another computer"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let text = cx
                                     .read_from_clipboard()
@@ -1066,7 +1096,12 @@ impl MainWindow {
                         })
                         .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
                         .when(here, |el| {
-                            el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
+                            el.child(mark(
+                                tr!("This PC"),
+                                theme.muted_foreground,
+                                theme.background,
+                                theme.border,
+                            ))
                         })
                         .child(div().flex_1())
                         .child({
@@ -1108,7 +1143,7 @@ impl MainWindow {
                 Button::new(SharedString::from(format!("add-{idx}")))
                     .xsmall()
                     .ghost()
-                    .label("+ 添加电脑")
+                    .label(tr!("+ Add computer"))
                     .disabled(free.is_none())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(port) = free {
@@ -1121,7 +1156,7 @@ impl MainWindow {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。"),
+                        .child(tr!("The monitor does not report its input list, so these are the common ports; add more under extra_inputs in the config.")),
                 )
             })
             .into_any_element()
@@ -1144,7 +1179,7 @@ impl MainWindow {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("这台显示器没有上报输入列表，先在配置文件的 extra_inputs 里补上接口。")
+                        .child(tr!("This monitor does not report an input list; add its ports under extra_inputs in the config first."))
                         .into_any_element()
                 } else {
                     self.render_endpoint_editor(idx, m, c, &endpoints, &inputs, cx)
@@ -1172,18 +1207,24 @@ impl MainWindow {
         let t = &c.tracker;
         let work = t.settings().work_secs;
         let (title, detail) = match t.phase() {
-            _ if !c.config.breaks.enabled => ("休息提醒已关闭".to_string(), "可以在「设置」里重新打开".to_string()),
-            Phase::Away => ("你离开了一会儿 👋".to_string(), "回来后会开始新的一轮计时".to_string()),
+            _ if !c.config.breaks.enabled => (
+                tr!("Break reminders are off").to_string(),
+                tr!("Turn them back on from the Settings tab").to_string(),
+            ),
+            Phase::Away => (
+                tr!("You stepped away for a while 👋").to_string(),
+                tr!("A fresh timer starts when you come back").to_string(),
+            ),
             Phase::Prompted { .. } => (
-                "正在休息".to_string(),
-                format!("还需休息 {}", format_minutes(t.rest_remaining())),
+                tr!("Taking a break").to_string(),
+                tr!("Rest for another {time}", time = format_minutes(t.rest_remaining())),
             ),
             Phase::Working => (
-                format!("已连续工作 {}", format_minutes(t.session_active())),
+                tr!("Working for {time}", time = format_minutes(t.session_active())),
                 if c.is_paused() {
-                    "提醒已暂停".to_string()
+                    tr!("Reminders are paused").to_string()
                 } else {
-                    format!("{} 后提醒休息", format_minutes(t.until_prompt()))
+                    tr!("Break in {time}", time = format_minutes(t.until_prompt()))
                 },
             ),
         };
@@ -1220,13 +1261,16 @@ impl MainWindow {
                     .child(
                         Button::new("snooze")
                             .primary()
-                            .label(format!("推迟 {} 分钟", c.config.breaks.snooze_minutes))
+                            .label(tr!(
+                                n = c.config.breaks.snooze_minutes,
+                                "Snooze for 1 min" | "Snooze for {n} min"
+                            ))
                             .on_click(move |_, _, cx| snooze.update(cx, |c, cx| c.snooze(cx))),
                     )
                     .child(
                         Button::new("skip")
                             .outline()
-                            .label("跳过这次")
+                            .label(tr!("Skip this break"))
                             .on_click(move |_, _, cx| skip.update(cx, |c, cx| c.skip(cx))),
                     )
             } else {
@@ -1236,7 +1280,7 @@ impl MainWindow {
                         Button::new("break-now")
                             .primary()
                             .icon(Icon::new(Lucide::Coffee))
-                            .label("现在休息")
+                            .label(tr!("Take a break now"))
                             .disabled(t.phase() != Phase::Working)
                             .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.break_now(cx))),
                     )
@@ -1244,9 +1288,9 @@ impl MainWindow {
                         Button::new("pause")
                             .outline()
                             .label(if c.is_paused() {
-                                "恢复提醒"
+                                tr!("Resume reminders")
                             } else {
-                                "暂停 1 小时"
+                                tr!("Pause reminders for 1 hour")
                             })
                             .on_click(move |_, _, cx| controller2.update(cx, |c, cx| c.toggle_pause(cx))),
                     )
@@ -1254,7 +1298,7 @@ impl MainWindow {
 
         let score_card = card(cx)
             .gap_2()
-            .child(section_label("今日健康分", cx))
+            .child(section_label(tr!("Today's health score"), cx))
             .child(
                 h_flex()
                     .items_end()
@@ -1266,21 +1310,30 @@ impl MainWindow {
                             .text_color(score_color(score, cx))
                             .child(score.map_or("--".to_string(), |s| s.to_string())),
                     )
-                    .child(div().pb_2().text_lg().child(score.map_or("使用 15 分钟后开始评分", stats::grade))),
+                    .child(div().pb_2().text_lg().child(
+                        score.map_or(tr!("Scoring starts after 15 minutes of use"), stats::grade),
+                    )),
             )
             .child(
                 h_flex()
                     .gap_4()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(format!("用眼 {}", format_minutes(day.active_secs() + t.session_active())))
-                    .child(format!("休息 {} 次", day.breaks()))
-                    .child(format!("最长连续 {}", format_minutes(day.longest_secs().max(t.session_active()))))
-                    .child(format!("今日积分 +{}", day.points())),
+                    .child(tr!(
+                        "Screen time {time}",
+                        time = format_minutes(day.active_secs() + t.session_active())
+                    ))
+                    .child(tr!(n = day.breaks(), "1 break" | "{n} breaks"))
+                    .child(tr!(
+                        "Longest stretch {time}",
+                        time = format_minutes(day.longest_secs().max(t.session_active()))
+                    ))
+                    .child(tr!("+{points} points today", points = day.points())),
             )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(format!(
-                "评分规则：每段连续工作不超过 {} 分钟的 110% 记满分，超得越多扣得越多。离开电脑 {} 分钟会被自动记为一次休息。",
-                c.config.breaks.work_minutes, c.config.breaks.break_minutes
+            .child(div().text_xs().text_color(theme.muted_foreground).child(tr!(
+                "Scoring: a session scores full marks up to 110% of {work} minutes, and loses more the longer it runs past that. Being away from the computer for {rest} minutes counts as a break automatically.",
+                work = c.config.breaks.work_minutes,
+                rest = c.config.breaks.break_minutes
             )));
 
         v_flex().gap_4().child(status).child(score_card).into_any_element()
@@ -1299,9 +1352,14 @@ impl MainWindow {
 
         let summary = h_flex()
             .gap_3()
-            .child(stat_tile(Lucide::Flame, format!("{streak} 天"), "连续达标", cx))
-            .child(stat_tile(Lucide::Trophy, format!("{points}"), "累计积分", cx))
-            .child(stat_tile(Lucide::Activity, level.to_string(), "当前称号", cx));
+            .child(stat_tile(
+                Lucide::Flame,
+                tr!(n = streak, "1 day" | "{n} days"),
+                tr!("Streak"),
+                cx,
+            ))
+            .child(stat_tile(Lucide::Trophy, format!("{points}"), tr!("Total points"), cx))
+            .child(stat_tile(Lucide::Activity, level.to_string(), tr!("Current title"), cx));
 
         let level_progress = match next {
             Some(next) => (points - level_min) as f32 / (next - level_min) as f32 * 100.0,
@@ -1311,8 +1369,11 @@ impl MainWindow {
             .gap_2()
             .child(h_flex().justify_between().text_sm().child(level).child(
                 div().text_color(theme.muted_foreground).child(match next {
-                    Some(n) => format!("再得 {} 分升级", n - points),
-                    None => "已满级".to_string(),
+                    Some(n) => tr!(
+                        n = n - points,
+                        "1 more point to level up" | "{n} more points to level up"
+                    ),
+                    None => tr!("Highest level reached").to_string(),
                 }),
             ))
             .child(Progress::new("level").value(level_progress));
@@ -1348,7 +1409,7 @@ impl MainWindow {
                     )
                     .child(div().w_full().h(px(height)).rounded_md().bg(color))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(if ago == 0 {
-                        "今天".to_string()
+                        tr!("Today").to_string()
                     } else {
                         date.format("%m/%d").to_string()
                     }))
@@ -1362,7 +1423,7 @@ impl MainWindow {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("今天还没有完成的工作段"),
+                    .child(tr!("No completed sessions today")),
             );
         }
         for s in day.sessions.iter().rev() {
@@ -1382,22 +1443,24 @@ impl MainWindow {
                     .child(div().w(px(100.)).child(format!("{} – {}", fmt(s.start), fmt(s.end))))
                     .child(div().flex_1().child(format_minutes(s.active_secs)))
                     .child(div().text_color(theme.muted_foreground).child(match s.kind {
-                        BreakKind::Natural => "自然休息",
-                        BreakKind::Prompted => "提醒后休息",
+                        BreakKind::Natural => tr!("Natural break"),
+                        BreakKind::Prompted => tr!("Prompted break"),
                     }))
                     .child(
                         div()
                             .w(px(56.))
                             .text_right()
                             .text_color(score_color(Some(score), cx))
-                            .child(format!("{score} 分")),
+                            .child(tr!("{score} points", score = score)),
                     ),
             );
         }
         let skips = (day.skips + day.snoozes + day.ignored > 0).then(|| {
-            div().text_xs().text_color(theme.muted_foreground).child(format!(
-                "今天跳过 {} 次、推迟 {} 次、忽略 {} 次提醒",
-                day.skips, day.snoozes, day.ignored
+            div().text_xs().text_color(theme.muted_foreground).child(tr!(
+                "Today: {skipped} skipped, {snoozed} snoozed, {ignored} ignored",
+                skipped = day.skips,
+                snoozed = day.snoozes,
+                ignored = day.ignored
             ))
         });
 
@@ -1405,11 +1468,16 @@ impl MainWindow {
             .gap_4()
             .child(summary)
             .child(level_card)
-            .child(card(cx).gap_2().child(section_label("最近 7 天健康分", cx)).child(bars))
+            .child(
+                card(cx)
+                    .gap_2()
+                    .child(section_label(tr!("Health score, last 7 days"), cx))
+                    .child(bars),
+            )
             .child(
                 card(cx)
                     .gap_1()
-                    .child(section_label("今日工作段", cx))
+                    .child(section_label(tr!("Today's sessions"), cx))
                     .child(sessions)
                     .children(skips),
             )
@@ -1447,11 +1515,16 @@ impl MainWindow {
             h_flex()
                 .justify_between()
                 .items_center()
-                .child(label)
+                .child(translate(label))
                 .children(self.numbers.get(key).map(|f| {
                     div().w(px(148.)).child(
-                        f.input()
-                            .suffix(div().pr_1().text_sm().text_color(theme.muted_foreground).child("分钟")),
+                        f.input().suffix(
+                            div()
+                                .pr_1()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(tr!("min")),
+                        ),
                     )
                 }))
         };
@@ -1477,52 +1550,86 @@ impl MainWindow {
                 }))
         };
 
+        let language_picker = || {
+            let controller = self.controller.clone();
+            let current = c.config.language;
+            h_flex()
+                .gap_1()
+                .children(crate::i18n::Language::ALL.into_iter().map(|lang| {
+                    let controller = controller.clone();
+                    Button::new(SharedString::from(format!("language-{lang:?}")))
+                        .xsmall()
+                        .when(lang == current, |b| b.primary())
+                        .when(lang != current, |b| b.ghost())
+                        // A language names itself, in its own language: whoever
+                        // picked the wrong one still has to find the way back.
+                        .label(lang.label())
+                        .on_click(move |_, _, cx| {
+                            controller.update(cx, |c, cx| c.set_language(lang, cx));
+                        })
+                }))
+        };
+
         let theme_row = h_flex()
             .justify_between()
             .gap_4()
             .child(
-                v_flex().child("外观").child(
+                v_flex().child(tr!("Appearance")).child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("「跟随系统」会随 Windows 的浅色 / 深色设置实时切换"),
+                        .child(tr!("System tracks the Windows light / dark setting as you change it")),
                 ),
             )
             .child(theme_picker());
 
+        let language_row = h_flex()
+            .justify_between()
+            .gap_4()
+            .child(
+                v_flex().child(tr!("Language")).child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("Switching redraws every window right away")),
+                ),
+            )
+            .child(language_picker());
+
         let general = card(cx)
             .gap_4()
-            .child(section_label("通用", cx))
+            .child(section_label(tr!("General"), cx))
             .child(theme_row)
+            .child(language_row)
             .child(toggle_row(
                 "autostart",
-                "开机自动启动",
-                "登录 Windows 后在托盘里静默运行",
+                tr!("Start automatically at login"),
+                tr!("Runs quietly in the tray after you sign in to Windows"),
                 c.autostart,
                 |c, v, cx| c.set_autostart(v, cx),
             ))
             .child(toggle_row(
                 "developer-mode",
-                "开发者模式",
-                "在「显示器」页显示 DDC/CI 诊断信息和命令记录，并在日志里记录每条命令",
+                tr!("Developer mode"),
+                tr!("Shows DDC/CI diagnostics and command tracing on the Monitors tab, and logs every command"),
                 c.config.developer_mode,
                 |c, v, cx| c.set_developer_mode(v, cx),
             ));
 
         let breaks = card(cx)
             .gap_4()
-            .child(section_label("休息提醒", cx))
+            .child(section_label(tr!("Break reminders"), cx))
             .child(toggle_row(
                 "breaks-enabled",
-                "启用休息提醒",
-                "到点后全屏淡入提醒，离开电脑会自动记为休息",
+                tr!("Turn on break reminders"),
+                tr!("When the time is up, a full-screen reminder fades in; stepping away counts as a break automatically"),
                 b.enabled,
                 |c, v, cx| c.update_config(cx, |cfg| cfg.breaks.enabled = v),
             ))
             .child(toggle_row(
                 "fullscreen",
-                "全屏 / 演示时不打扰",
-                "玩游戏、看视频或演示 PPT 时推迟提醒",
+                tr!("Stay quiet in fullscreen / presentations"),
+                tr!("Holds reminders while you are gaming, watching video, or presenting"),
                 b.respect_fullscreen,
                 |c, v, cx| c.update_config(cx, |cfg| cfg.breaks.respect_fullscreen = v),
             ))
@@ -1535,7 +1642,7 @@ impl MainWindow {
                 .text_sm()
                 .child(label)
                 .child(div().text_color(theme.muted_foreground).child(if value.is_empty() {
-                    "未设置".to_string()
+                    tr!("Not set").to_string()
                 } else {
                     value.to_string()
                 }))
@@ -1547,16 +1654,16 @@ impl MainWindow {
             let import = self.controller.clone();
             card(cx)
                 .gap_4()
-                .child(section_label("显示器输入", cx))
+                .child(section_label(tr!("Monitor inputs"), cx))
                 .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    "给每台显示器列出共用它的电脑并起好名字 —— 名字是唯一能让你一眼认出谁是谁的东西。点左端圆点标记你正坐着的那台，只影响显示，不影响切换。",
+                    tr!("List the computers sharing each monitor and give them names — the names are the only thing that lets you tell them apart at a glance. Click the dot on the left to mark the one you are sitting at; it only affects what is shown, never switching."),
                 ))
                 .when(c.monitors.is_empty(), |el| {
                     el.child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("还没有检测到支持 DDC/CI 的外接显示器。"),
+                            .child(tr!("No external monitors that support DDC/CI have been detected yet.")),
                     )
                 })
                 .children(
@@ -1567,7 +1674,7 @@ impl MainWindow {
                 )
                 .child(div().h(px(1.)).bg(theme.border))
                 .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    "「接口 → 电脑名」跟着显示器走，所以在哪台电脑上填都一样。在一台上填好，把它搬到其余几台，就不用再填一遍。",
+                    tr!("The port-to-name mapping lives on the monitor, so it holds whichever computer you fill it in on. Set it up once and move it to the rest, and you never type it in again."),
                 ))
                 .child(
                     h_flex()
@@ -1577,12 +1684,13 @@ impl MainWindow {
                                 .small()
                                 .outline()
                                 .icon(Icon::new(Lucide::Copy))
-                                .label("复制设置")
+                                .label(tr!("Copy settings"))
                                 .on_click(move |_, _, cx| {
                                     let text = export.read(cx).export_switching();
                                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                                     export.update(cx, |c, cx| {
-                                        c.notice = Some("已复制。在另一台电脑上点「导入设置」。".into());
+                                        c.notice =
+                                            Some(tr!("Copied. Click \"Import settings\" on the other computer.").into());
                                         cx.notify();
                                     });
                                 }),
@@ -1591,7 +1699,7 @@ impl MainWindow {
                             Button::new("import-switching")
                                 .small()
                                 .outline()
-                                .label("导入设置")
+                                .label(tr!("Import settings"))
                                 .on_click(move |_, _, cx| {
                                     let text = cx
                                         .read_from_clipboard()
@@ -1607,22 +1715,26 @@ impl MainWindow {
 
         let hotkey_card = card(cx)
             .gap_2()
-            .child(section_label("全局快捷键（修改配置文件后重启生效）", cx))
-            .child(hk("切换显示器输入", &hotkeys.toggle_input))
-            .child(hk("调高亮度", &hotkeys.brightness_up))
-            .child(hk("调低亮度", &hotkeys.brightness_down))
-            .child(hk("现在休息", &hotkeys.break_now))
-            .children(
-                c.hotkey_errors
-                    .iter()
-                    .map(|e| div().text_xs().text_color(theme.danger).child(format!("注册失败 {e}"))),
-            )
+            .child(section_label(
+                tr!("Global hotkeys (restart after editing the config file)"),
+                cx,
+            ))
+            .child(hk(tr!("Switch monitor input"), &hotkeys.toggle_input))
+            .child(hk(tr!("Brightness up"), &hotkeys.brightness_up))
+            .child(hk(tr!("Brightness down"), &hotkeys.brightness_down))
+            .child(hk(tr!("Take a break now"), &hotkeys.break_now))
+            .children(c.hotkey_errors.iter().map(|e| {
+                div()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(tr!("Registration failed: {e}", e = e))
+            }))
             .child(
                 h_flex().pt_2().child(
                     Button::new("open-config")
                         .small()
                         .outline()
-                        .label("打开配置文件夹")
+                        .label(tr!("Open config folder"))
                         .on_click(|_, _, cx| {
                             let dir = config::data_dir();
                             let _ = std::fs::create_dir_all(&dir);
@@ -1662,10 +1774,10 @@ impl Render for MainWindow {
             .segmented()
             .small()
             .selected_index(tab_index)
-            .child("显示器")
-            .child("休息")
-            .child("统计")
-            .child("设置")
+            .child(tr!("Monitors"))
+            .child(tr!("Breaks"))
+            .child(tr!("Stats"))
+            .child(tr!("Settings"))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 this.tab = TABS[*ix];
                 cx.notify();
@@ -1763,13 +1875,18 @@ fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
                 .gap_2()
                 .items_center()
                 .child(Icon::new(Lucide::Bug).size(px(14.)))
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("诊断信息")),
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(tr!("Diagnostics")),
+                ),
         )
         .child(mono(m.id().to_string()).text_color(theme.muted_foreground))
         .children(rows)
-        .child(section_label("最近的命令", cx))
+        .child(section_label(tr!("Recent commands"), cx))
         .when(trace.is_empty(), |el| {
-            el.child(div().text_xs().text_color(theme.muted_foreground).child("（暂无）"))
+            el.child(div().text_xs().text_color(theme.muted_foreground).child(tr!("(none)")))
         })
         .children(lines)
 }

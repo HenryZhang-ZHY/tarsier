@@ -10,6 +10,7 @@ use chrono::{Days, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::breaks::{BreakKind, EndedSession};
+use crate::i18n::translate;
 
 /// Sessions shorter than this don't earn points (but still count for time).
 const MIN_REWARDED_SECS: u64 = 10 * 60;
@@ -175,18 +176,21 @@ pub fn grade(score: u8) -> &'static str {
 }
 
 /// Title for the accumulated points, a small long-term motivator.
+///
+/// The English name is the source; `level` translates it on the way out, which
+/// a `const` table cannot do for itself.
 pub fn level(points: u32) -> (&'static str, u32, Option<u32>) {
     const LEVELS: &[(u32, &str)] = &[
-        (0, "久坐新手"),
-        (100, "伸展学徒"),
-        (300, "节奏达人"),
-        (800, "护眼卫士"),
-        (2000, "健康达人"),
-        (5000, "眼镜猴大师"),
+        (0, "Sedentary starter"),
+        (100, "Stretch apprentice"),
+        (300, "Pacing pro"),
+        (800, "Eye guardian"),
+        (2000, "Health pro"),
+        (5000, "Tarsier grandmaster"),
     ];
     let idx = LEVELS.iter().rposition(|(min, _)| points >= *min).unwrap_or(0);
     let next = LEVELS.get(idx + 1).map(|(min, _)| *min);
-    (LEVELS[idx].1, LEVELS[idx].0, next)
+    (translate(LEVELS[idx].1), LEVELS[idx].0, next)
 }
 
 #[cfg(test)]
@@ -259,8 +263,10 @@ mod tests {
     fn grades_and_levels() {
         assert_eq!(grade(100), "S");
         assert_eq!(grade(60), "C");
-        assert_eq!(level(0), ("久坐新手", 0, Some(100)));
-        assert_eq!(level(350).0, "节奏达人");
+        // Titles read in the language the UI is drawn in; English is the
+        // default and the source, so this is what an untranslated run shows.
+        assert_eq!(level(0), ("Sedentary starter", 0, Some(100)));
+        assert_eq!(level(350).0, "Pacing pro");
         assert_eq!(level(9999).2, None);
     }
 

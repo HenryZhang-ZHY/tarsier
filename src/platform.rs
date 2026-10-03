@@ -36,7 +36,7 @@ pub fn local_hostname() -> String {
         .map(|name| name.trim().to_string())
         .ok()
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "本机".to_string())
+        .unwrap_or_else(|| crate::i18n::translate("This PC").to_string())
 }
 
 /// Seconds since the last keyboard or mouse input in this session.

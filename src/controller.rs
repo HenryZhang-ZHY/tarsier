@@ -13,6 +13,7 @@ use crate::breaks::{BreakEvent, BreakTracker, Phase};
 use crate::config::{self, Config, MonitorPrefs};
 use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
+use crate::i18n::{self, Language, tr};
 use crate::platform;
 use crate::stats::{Session, Stats};
 use crate::tray;
@@ -102,6 +103,8 @@ impl Controller {
         let stats: Stats = config::load(&config::stats_path());
         let tracker = BreakTracker::new(config.breaks.settings(), now_ts());
         crate::logger::set_verbose(config.developer_mode);
+        // Before any window is built: every label is looked up as it is drawn.
+        i18n::set_language(config.language);
         let entity = cx.new(|cx| {
             let mut this = Controller {
                 config,
@@ -124,7 +127,7 @@ impl Controller {
             };
             this.refresh_monitors(cx);
             this.start_ticker(cx);
-            // Runs on tray "退出" and on Windows logoff/shutdown.
+            // Runs on tray "Quit" and on Windows logoff/shutdown.
             cx.on_app_quit(|this, _| {
                 this.shutdown();
                 async {}
@@ -423,10 +426,13 @@ impl Controller {
                 .spawn(async move { dev.switch_input(code) })
                 .await;
             this.update(cx, |this, cx| {
-                this.notice = Some(match result {
-                    Ok(()) => format!("已切换到 {label}").into(),
-                    Err(e) => format!("切换输入失败: {e}").into(),
-                });
+                this.notice = Some(
+                    match result {
+                        Ok(()) => tr!("Switched to {label}", label = label),
+                        Err(e) => tr!("Switching input failed: {e}", e = e),
+                    }
+                    .into(),
+                );
                 cx.notify();
             })
             .ok();
@@ -455,7 +461,8 @@ impl Controller {
             })
             .collect();
         if jobs.is_empty() {
-            self.notice = Some("还没有设置要切换的电脑，请在「设置」页添加".into());
+            self.notice =
+                Some(tr!("No computers are set up to switch between yet — add them on the Settings tab").into());
             cx.notify();
             self.show_main_window(cx);
             return;
@@ -480,7 +487,12 @@ impl Controller {
                 .collect::<Option<Vec<u8>>>();
             let Some(targets) = targets else {
                 this.update(cx, |this, cx| {
-                    this.notice = Some("读不出显示器现在在哪一路，没法盲翻 —— 在快切面板里选一台。".into());
+                    this.notice = Some(
+                        tr!(
+                            "Cannot read which input the monitor is on, so there is no direction to flip in — pick one in the quick-switch panel"
+                        )
+                        .into(),
+                    );
                     this.open_switch_hud(cx);
                 })
                 .ok();
@@ -508,12 +520,12 @@ impl Controller {
                             if let Some(m) = this.monitors.iter_mut().find(|m| m.id() == id) {
                                 m.current_input = Some(target);
                             }
-                            msgs.push(format!("已切换到 {}", this.input_label(&id, target)));
+                            msgs.push(tr!("Switched to {label}", label = this.input_label(&id, target)));
                         }
-                        Err(e) => msgs.push(format!("切换失败: {e}")),
+                        Err(e) => msgs.push(tr!("Switch failed: {e}", e = e)),
                     }
                 }
-                this.notice = Some(msgs.join("；").into());
+                this.notice = Some(msgs.join(tr!("; ")).into());
                 cx.notify();
             })
             .ok();
@@ -704,6 +716,16 @@ impl Controller {
         apply_theme(theme, cx);
     }
 
+    /// Persist the choice and repaint every window in it. A theme is something
+    /// a window can re-resolve for itself; a language is not — every label has
+    /// to be looked up again, so the windows are redrawn and the tray menu,
+    /// which is native, is rebuilt by `TrayState` carrying the language.
+    pub fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
+        i18n::set_language(language);
+        self.update_config(cx, |cfg| cfg.language = language);
+        cx.refresh_windows();
+    }
+
     /// Everything needed to debug monitor control on this machine, as text.
     pub fn diagnostics_report(&self) -> String {
         let mut out = format!(
@@ -736,7 +758,7 @@ impl Controller {
 
     pub fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if let Err(e) = platform::set_autostart(enabled) {
-            self.notice = Some(format!("设置开机启动失败: {e}").into());
+            self.notice = Some(tr!("Could not change the autostart setting: {e}", e = e).into());
         }
         self.autostart = platform::autostart_enabled();
         cx.notify();
@@ -744,7 +766,7 @@ impl Controller {
 
     fn save_config(&mut self) {
         if let Err(e) = config::save(&config::config_path(), &self.config) {
-            self.notice = Some(format!("保存设置失败: {e}").into());
+            self.notice = Some(tr!("Could not save settings: {e}", e = e).into());
         }
     }
 
@@ -784,7 +806,7 @@ impl Controller {
     /// Returns how many of this machine's monitors it matched.
     pub fn import_switching(&mut self, text: &str, cx: &mut Context<Self>) -> usize {
         let Ok(export) = serde_json::from_str::<config::SwitchingExport>(text) else {
-            self.notice = Some("剪贴板里没有 tarsier 的输入切换设置".into());
+            self.notice = Some(tr!("The clipboard does not hold tarsier input-switch settings").into());
             cx.notify();
             return 0;
         };
@@ -817,9 +839,10 @@ impl Controller {
         }
         self.save_config();
         self.notice = Some(
-            match matched {
-                0 => "剪贴板里的设置和当前接的显示器对不上".to_string(),
-                n => format!("已应用到 {n} 台显示器"),
+            if matched == 0 {
+                tr!("The clipboard settings do not match the monitors connected now").to_string()
+            } else {
+                tr!(n = matched, "Applied to 1 monitor" | "Applied to {n} monitors")
             }
             .into(),
         );
@@ -945,6 +968,7 @@ impl Controller {
             groups,
             paused: self.is_paused() || !self.config.breaks.enabled,
             break_active: matches!(self.tracker.phase(), Phase::Prompted { .. }),
+            language: self.config.language,
             tooltip: self.tooltip_text(),
         }
     }
@@ -953,13 +977,14 @@ impl Controller {
     pub fn tooltip_text(&self) -> String {
         let score = self.today_score().map_or("--".to_string(), |s| s.to_string());
         let state = if !self.config.breaks.enabled {
-            "休息提醒已关闭".to_string()
+            tr!("Break reminders are off").to_string()
         } else if self.is_paused() {
-            "提醒已暂停".to_string()
+            tr!("Reminders are paused").to_string()
         } else {
-            format!("{} 分钟后休息", self.tracker.until_prompt().div_ceil(60))
+            let minutes = self.tracker.until_prompt().div_ceil(60);
+            tr!(n = minutes, "Break in 1 minute" | "Break in {n} minutes")
         };
-        format!("tarsier · {state} · 今日 {score} 分")
+        tr!("tarsier · {state} · {score} pts today", state = state, score = score)
     }
 
     pub fn show_main_window(&mut self, cx: &mut Context<Self>) {

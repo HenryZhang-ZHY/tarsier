@@ -4,6 +4,7 @@ mod breaks;
 mod config;
 mod controller;
 mod display;
+mod i18n;
 mod logger;
 mod platform;
 mod stats;
@@ -40,7 +41,7 @@ fn main() {
     gpui_kit::application().with_assets(ui::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         // GPUI quits when the last window closes on Windows by default; we live
-        // in the tray, so only the tray's "退出" (or logoff) ends the process.
+        // in the tray, so only the tray's "Quit" (or logoff) ends the process.
         cx.set_quit_mode(QuitMode::Explicit);
         Theme::sync_system_appearance(None, cx);
         Theme::global_mut(cx).font_family = "Microsoft YaHei UI".into();

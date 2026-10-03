@@ -8,6 +8,8 @@ use std::borrow::Cow;
 use gpui_kit::assets::{Assets, icon_assets};
 use gpui_kit::*;
 
+use crate::i18n::tr;
+
 icon_assets!(
     ExtraIcons,
     [
@@ -49,9 +51,9 @@ impl AssetSource for AppAssets {
 pub fn format_minutes(secs: u64) -> String {
     let mins = secs / 60;
     if mins >= 60 {
-        format!("{} 小时 {} 分钟", mins / 60, mins % 60)
+        tr!("{n} h {m} min", n = mins / 60, m = mins % 60)
     } else {
-        format!("{mins} 分钟")
+        tr!("{n} min", n = mins)
     }
 }
 

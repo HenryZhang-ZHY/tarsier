@@ -39,6 +39,10 @@
 
 开发者模式，也可以在设置页打开。见[开发者模式](developer-mode.zh.md)。
 
+### `language`
+
+`"en"`（默认）或 `"zh"`，也可以在设置页切换。所有窗口和托盘菜单都用这个语言。英文是源语言，所以没有中文翻译的句子会直接显示英文，而不是显示成空白或占位符。
+
 ### `breaks`
 
 ```json
@@ -128,6 +132,7 @@
   },
   "brightness_step": 10,
   "developer_mode": false,
+  "language": "en",
   "breaks": {
     "enabled": true,
     "work_minutes": 50,

@@ -1,5 +1,11 @@
 //! Developer mode: what tarsier learned about each monitor while setting it
 //! up, and a plain-text report to paste into bug reports.
+//!
+//! The report itself stays English whatever language the interface is in. It is
+//! almost entirely identifiers, hex and driver error strings, and its whole
+//! purpose is to be pasted into a bug report, where one language for everybody
+//! is worth more than a translated label. The copy around it — the panel
+//! heading, the buttons — is translated like everything else.
 
 use std::fmt::Write as _;
 

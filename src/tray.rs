@@ -16,6 +16,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Sub
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Hotkeys;
+use crate::i18n::{Language, tr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -65,6 +66,10 @@ pub struct TrayState {
     pub groups: Vec<TrayGroup>,
     pub paused: bool,
     pub break_active: bool,
+    /// The language the menu was last built in. The labels come from `i18n`
+    /// like every other string, but the menu is native and only rebuilt when
+    /// this state changes, so the language has to be part of the comparison.
+    pub language: Language,
     pub tooltip: String,
 }
 
@@ -76,8 +81,8 @@ impl TrayState {
 
     /// Everything that changes the menu itself. The tooltip ticks once a
     /// minute and must not drag a native menu rebuild along with it.
-    fn menu_part(&self) -> (&[TrayGroup], bool, bool) {
-        (&self.groups, self.paused, self.break_active)
+    fn menu_part(&self) -> (&[TrayGroup], bool, bool, Language) {
+        (&self.groups, self.paused, self.break_active, self.language)
     }
 }
 
@@ -177,7 +182,7 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
     let mut built = Built::default();
     let menu = Menu::new();
 
-    push_item(&menu, &mut built, "open", "打开 tarsier", Command::ShowWindow)?;
+    push_item(&menu, &mut built, "open", tr!("Open tarsier"), Command::ShowWindow)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
     if !state.has_switching() {
@@ -185,7 +190,7 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
             &menu,
             &mut built,
             "switch-setup",
-            "设置显示器输入…",
+            tr!("Set up monitor inputs…"),
             Command::ShowWindow,
         )?;
     } else {
@@ -193,7 +198,7 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
         // a flip has to read the monitor to know which way to go, and when that
         // reading is missing or lands outside the pair the entry can only do
         // nothing. The hotkey still flips, and asks when it cannot.
-        let picker = Submenu::new("切换到", true);
+        let picker = Submenu::new(tr!("Switch to"), true);
         for group in &state.groups {
             if state.groups.len() > 1 {
                 picker.append(&PredefinedMenuItem::separator())?;
@@ -216,10 +221,16 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
     }
 
     menu.append(&PredefinedMenuItem::separator())?;
-    push_item(&menu, &mut built, "break-now", "现在休息", Command::BreakNow)?;
+    push_item(
+        &menu,
+        &mut built,
+        "break-now",
+        tr!("Take a break now"),
+        Command::BreakNow,
+    )?;
     for (id, text, command) in [
-        ("snooze", "推迟这次休息", Command::Snooze),
-        ("skip", "跳过这次休息", Command::Skip),
+        ("snooze", tr!("Snooze this break"), Command::Snooze),
+        ("skip", tr!("Skip this break"), Command::Skip),
     ] {
         let item = MenuItem::with_id(id, text, state.break_active, None);
         built.commands.push((item.id().clone(), command));
@@ -230,14 +241,14 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
         &mut built,
         "pause",
         if state.paused {
-            "恢复提醒"
+            tr!("Resume reminders")
         } else {
-            "暂停提醒 1 小时"
+            tr!("Pause reminders for 1 hour")
         },
         Command::TogglePause,
     )?;
     menu.append(&PredefinedMenuItem::separator())?;
-    push_item(&menu, &mut built, "quit", "退出", Command::Quit)?;
+    push_item(&menu, &mut built, "quit", tr!("Quit"), Command::Quit)?;
 
     Ok((menu, built))
 }
@@ -359,7 +370,7 @@ mod tests {
             groups: vec![group(
                 r"\\?\DISPLAY#GSM5BF6#5&1a2b3c4d&0&UID4353",
                 "27GP950",
-                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
+                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "Desktop")],
             )],
             tooltip: "tarsier".to_string(),
             ..Default::default()
@@ -392,7 +403,7 @@ mod tests {
             groups: vec![group(
                 id,
                 "27GP950",
-                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
+                vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "Desktop")],
             )],
             tooltip: "tarsier".to_string(),
             ..Default::default()
@@ -412,8 +423,8 @@ mod tests {
                 "27GP950",
                 vec![
                     endpoint(0x10, "MacBook Pro"),
-                    endpoint(0x12, "台式机"),
-                    endpoint(0x11, "游戏机"),
+                    endpoint(0x12, "Desktop"),
+                    endpoint(0x11, "Console"),
                 ],
             )],
             tooltip: "tarsier".to_string(),
@@ -443,12 +454,12 @@ mod tests {
                 group(
                     "monitor-a",
                     "27GP950",
-                    vec![endpoint(0x11, "笔记本"), endpoint(0x12, "台式机")],
+                    vec![endpoint(0x11, "Laptop"), endpoint(0x12, "Desktop")],
                 ),
                 group(
                     "monitor-b",
                     "U2723QE",
-                    vec![endpoint(0x11, "游戏机"), endpoint(0x0F, "NAS")],
+                    vec![endpoint(0x11, "Console"), endpoint(0x0F, "NAS")],
                 ),
             ],
             tooltip: "tarsier".to_string(),

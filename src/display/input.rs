@@ -15,6 +15,7 @@ use super::channel::{RawDdcChannel, VcpChannel};
 use super::ddcci::Packet;
 use super::identity::Identity;
 use super::mccs::{self, Capabilities, VCP_INPUT_SOURCE};
+use crate::i18n::tr;
 
 /// The transports a protocol may use for one monitor.
 pub struct Channels<'a> {
@@ -160,13 +161,15 @@ impl InputProtocol for LgSideChannel {
 
     fn switch(&self, ch: &Channels, input: u8) -> Result<()> {
         let Some(&value) = self.values.get(&input) else {
-            bail!(
-                "不知道 {} 在 LG 私有通道上的编号，请在配置的 input_protocol.values 里补充",
-                mccs::input_source_name(input)
-            );
+            bail!(tr!(
+                "No LG side-channel value is known for {port} — add one under input_protocol.values in the config",
+                port = mccs::input_source_name(input)
+            ));
         };
         let Some(raw) = ch.raw else {
-            bail!("这台 LG 显示器只能由显卡直接发 I²C 命令切换输入，当前显卡不支持（目前支持 NVIDIA）");
+            bail!(tr!(
+                "This LG monitor only accepts input switching as I²C commands sent straight by the GPU, which this GPU does not support (NVIDIA today)"
+            ));
         };
         raw.write(&Packet::set_vcp(LG_HOST_ADDR, LG_INPUT_CODE, value as u16))
     }

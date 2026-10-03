@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::breaks::BreakSettings;
 use crate::display::InputProtocolPref;
+use crate::i18n::{Language, tr};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -25,6 +26,8 @@ pub struct Config {
     pub developer_mode: bool,
     /// Light, dark, or follow the system.
     pub theme: ThemePref,
+    /// The language every window is drawn in.
+    pub language: Language,
 }
 
 /// Which appearance the UI uses. `System` tracks Windows and follows it live.
@@ -41,9 +44,9 @@ impl ThemePref {
     /// Label for the settings row, in picker order.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Light => "亮色",
-            Self::Dark => "暗色",
-            Self::System => "跟随系统",
+            Self::Light => tr!("Light"),
+            Self::Dark => tr!("Dark"),
+            Self::System => tr!("System"),
         }
     }
 
@@ -97,6 +100,7 @@ impl Default for Config {
             monitors: BTreeMap::new(),
             developer_mode: false,
             theme: ThemePref::default(),
+            language: Language::default(),
         }
     }
 }
@@ -168,7 +172,7 @@ pub struct MonitorPrefs {
     /// [`Config::migrate`] and never written back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toggle: Option<[u8; 2]>,
-    /// Custom labels, e.g. `{"17": "台式机", "15": "笔记本"}` (keys are decimal VCP values).
+    /// Custom labels, e.g. `{"17": "Desktop", "15": "Laptop"}` (keys are decimal VCP values).
     /// These are the computer names shown in the UI, tray and quick-switch panel.
     pub input_names: BTreeMap<u8, String>,
     /// Extra input codes for monitors that under-report their capabilities.
@@ -326,7 +330,7 @@ mod tests {
         let prefs = cfg.monitors.entry("m".into()).or_default();
         prefs.endpoints = vec![0x0F, 0x11, 0x12];
         prefs.local_input = Some(0x11);
-        prefs.input_names.insert(0x11, "笔记本".into());
+        prefs.input_names.insert(0x11, "Laptop".into());
         prefs.input_protocol = serde_json::from_str(r#"{"kind":"lg","values":{"16":210}}"#).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<Config>(&json).unwrap(), cfg);
@@ -335,15 +339,15 @@ mod tests {
     #[test]
     fn old_toggle_pair_becomes_endpoints() {
         let mut cfg: Config = serde_json::from_str(
-            r#"{"monitors":{"DEL41A3":{"toggle":[15,17],"input_names":{"17":"台式机","15":"笔记本"}}}}"#,
+            r#"{"monitors":{"DEL41A3":{"toggle":[15,17],"input_names":{"17":"Desktop","15":"Laptop"}}}}"#,
         )
         .unwrap();
         cfg.migrate();
         let prefs = &cfg.monitors["DEL41A3"];
         assert_eq!(prefs.endpoints, vec![15, 17], "order is kept");
         assert_eq!(prefs.local_input, Some(15));
-        assert_eq!(prefs.label(17), "台式机", "names survive the upgrade");
-        assert_eq!(prefs.label(15), "笔记本");
+        assert_eq!(prefs.label(17), "Desktop", "names survive the upgrade");
+        assert_eq!(prefs.label(15), "Laptop");
         // The legacy key is consumed rather than left behind.
         assert_eq!(prefs.toggle, None);
         assert!(!serde_json::to_string(prefs).unwrap().contains("toggle"));
@@ -368,8 +372,8 @@ mod tests {
         assert!(!prefs.is_named(0x10));
         prefs.input_names.insert(0x10, "  ".into());
         assert_eq!(prefs.label(0x10), "DisplayPort 2", "blank names are ignored");
-        prefs.input_names.insert(0x10, "台式机".into());
-        assert_eq!(prefs.label(0x10), "台式机");
+        prefs.input_names.insert(0x10, "Desktop".into());
+        assert_eq!(prefs.label(0x10), "Desktop");
         assert!(prefs.is_named(0x10));
     }
 
@@ -378,21 +382,21 @@ mod tests {
         let mut prefs = MonitorPrefs {
             endpoints: vec![0x0F, 0x10, 0x11],
             local_input: Some(0x0F),
-            input_names: BTreeMap::from([(0x0Fu8, "笔记本".to_string()), (0x10u8, "台式机".to_string())]),
+            input_names: BTreeMap::from([(0x0Fu8, "Laptop".to_string()), (0x10u8, "Desktop".to_string())]),
             ..Default::default()
         };
         // Onto a free port: the name follows the computer, the local mark too.
         prefs.move_endpoint(0x0F, 0x12);
         assert_eq!(prefs.endpoints, vec![0x12, 0x10, 0x11]);
         assert_eq!(prefs.local_input, Some(0x12));
-        assert_eq!(prefs.label(0x12), "笔记本");
+        assert_eq!(prefs.label(0x12), "Laptop");
         assert!(!prefs.is_named(0x0F), "the old port is left clean");
 
         // Onto an occupied one: the two swap, so no port hosts two computers.
         prefs.move_endpoint(0x12, 0x10);
         assert_eq!(prefs.endpoints, vec![0x10, 0x12, 0x11]);
-        assert_eq!(prefs.label(0x10), "笔记本");
-        assert_eq!(prefs.label(0x12), "台式机");
+        assert_eq!(prefs.label(0x10), "Laptop");
+        assert_eq!(prefs.label(0x12), "Desktop");
         assert_eq!(prefs.local_input, Some(0x10));
 
         // Unknown ports and no-ops leave everything alone.
@@ -407,7 +411,7 @@ mod tests {
         let prefs = MonitorPrefs {
             endpoints: vec![0x0F, 0x10],
             local_input: Some(0x0F),
-            input_names: BTreeMap::from([(0x0Fu8, "笔记本".to_string())]),
+            input_names: BTreeMap::from([(0x0Fu8, "Laptop".to_string())]),
             extra_inputs: vec![0x1B],
             ..Default::default()
         };
@@ -428,7 +432,7 @@ mod tests {
         let back: SwitchingExport = serde_json::from_str(&serde_json::to_string(&export).unwrap()).unwrap();
         assert_eq!(back.version, SWITCHING_EXPORT_VERSION);
         assert_eq!(back.monitors["27GP950"].endpoints, vec![0x0F, 0x10]);
-        assert_eq!(back.monitors["27GP950"].label(0x0F), "笔记本");
+        assert_eq!(back.monitors["27GP950"].label(0x0F), "Laptop");
         assert_eq!(back.monitors["27GP950"].local_input, None);
     }
 }

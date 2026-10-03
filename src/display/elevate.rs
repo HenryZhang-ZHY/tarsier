@@ -162,7 +162,11 @@ pub fn run_elevated(request: &HelperRequest) -> Result<()> {
         ..Default::default()
     };
     // Fails with ERROR_CANCELLED when the user declines the prompt.
-    unsafe { ShellExecuteExW(&mut info) }.map_err(|_| anyhow!("没有获得管理员授权，已取消切换"))?;
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|_| {
+        anyhow!(crate::i18n::translate(
+            "Administrator permission was not granted, so the switch was cancelled"
+        ))
+    })?;
     let mut code = 1u32;
     unsafe {
         WaitForSingleObject(info.hProcess, INFINITE);

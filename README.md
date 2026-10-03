@@ -4,7 +4,7 @@
 
 A small Windows utility for managing monitors and screen time, written in Rust with [GPUI](https://gpui.rs) (using the [gpui-kit](https://gpui-kit.com) component library). Inspired by Twinkle Tray and Fadetop.
 
-It lives in the tray, draws its own title bar, and supports light, dark, and follow-system themes.
+It lives in the tray, draws its own title bar, supports light, dark, and follow-system themes, and is drawn in English or Chinese.
 
 ## Features
 

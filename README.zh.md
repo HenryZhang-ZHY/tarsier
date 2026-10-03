@@ -4,7 +4,7 @@
 
 管理显示器和屏幕时间的 Windows 小工具，用 Rust + [GPUI](https://gpui.rs)（[gpui-kit](https://gpui-kit.com) 组件库）编写。灵感来自 Twinkle Tray 和 Fadetop。
 
-常驻托盘，自绘标题栏，支持亮 / 暗 / 跟随系统三种主题。
+常驻托盘，自绘标题栏，支持亮 / 暗 / 跟随系统三种主题，界面语言可切英文或中文。
 
 ## 功能
 

@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::controller::Controller;
+use crate::i18n::tr;
 
 /// Long enough to read and choose, short enough that a stray hotkey does not
 /// leave a panel parked on screen.
@@ -179,7 +180,7 @@ impl Render for SwitchHud {
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("切换显示器输入"),
+                                .child(tr!("Switch monitor input")),
                         ),
                 )
                 .children(rows)
@@ -189,8 +190,8 @@ impl Render for SwitchHud {
                         .pt_2()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child("按数字键直达")
-                        .child("Esc 取消"),
+                        .child(tr!("Press a number to jump straight there"))
+                        .child(tr!("Esc to cancel")),
                 ),
         )
     }
