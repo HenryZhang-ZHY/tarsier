@@ -1,6 +1,7 @@
 //! Main window: monitors, breaks, statistics and settings tabs.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{Days, Local, TimeZone};
 use gpui_kit::assets::IconName as Lucide;
@@ -850,20 +851,7 @@ impl Render for MainWindow {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(
-                        div()
-                            .size(px(22.))
-                            .rounded_md()
-                            .bg(theme.primary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(Lucide::Monitor)
-                                    .size(px(13.))
-                                    .text_color(theme.primary_foreground),
-                            ),
-                    )
+                    .child(img(brand_icon()).size(px(22.)))
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("tarsier")),
             )
             .child(div().pr_2().child(tabs));
@@ -971,6 +959,18 @@ fn section_label(text: &'static str, cx: &App) -> impl IntoElement {
         .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text)
+}
+
+/// The app icon, decoded once so GPUI's image cache keeps hitting the same id.
+fn brand_icon() -> Arc<Image> {
+    static ICON: OnceLock<Arc<Image>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../../assets/icon.png").to_vec(),
+        ))
+    })
+    .clone()
 }
 
 fn stat_tile(icon: Lucide, value: String, label: &'static str, cx: &App) -> impl IntoElement {
