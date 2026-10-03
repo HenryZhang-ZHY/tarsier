@@ -73,26 +73,13 @@ pub fn now_ts() -> i64 {
     Local::now().timestamp()
 }
 
-/// The tray entry that names where the hotkey will land.
+/// Where a blind flip lands: the other endpoint when the monitor is showing
+/// the first, and the first otherwise.
 ///
-/// Only a single monitor shared by exactly two computers has an unambiguous
-/// "the other one". With three or more there is no single destination, so the
-/// menu names the action instead and the hotkey opens the chooser.
-pub fn switch_headline(groups: &[tray::TrayGroup]) -> Option<String> {
-    let [group] = groups else {
-        return None;
-    };
-    let [a, b] = group.endpoints.as_slice() else {
-        return None;
-    };
-    let target = match (a.current, b.current) {
-        (true, false) => b,
-        (false, true) => a,
-        // Nothing is known about the current input, so there is no honest
-        // destination to name. The flip itself still works.
-        _ => return None,
-    };
-    Some(format!("⇄ 切换到 {}", target.name))
+/// An input outside the pair — a third device, or a value the monitor reports
+/// oddly — also lands on the first.
+pub fn flip_destination(pair: [u8; 2], current: Option<u8>) -> u8 {
+    if current == Some(pair[0]) { pair[1] } else { pair[0] }
 }
 
 pub fn local_date(ts: i64) -> NaiveDate {
@@ -464,7 +451,7 @@ impl Controller {
                         .map(|(dev, [a, b], cached)| {
                             // Read fresh: the monitor's own buttons may have changed it.
                             let current = dev.current_input().or(cached);
-                            let target = if current == Some(a) { b } else { a };
+                            let target = flip_destination([a, b], current);
                             (dev.id.clone(), target, dev.switch_input(target))
                         })
                         .collect::<Vec<_>>()
@@ -869,6 +856,11 @@ impl Controller {
 
     /// What the tray menu should show right now. Compared by value on the tray
     /// side, so this can be rebuilt freely.
+    ///
+    /// Deliberately carries no "which one is live" flag: that would mean
+    /// reading the monitor's current input on a timer, and the answer can be
+    /// changed by the other computer at any moment. The menu lists the
+    /// destinations; it does not pretend to know where you are.
     pub fn tray_state(&self) -> tray::TrayState {
         let groups: Vec<tray::TrayGroup> = self
             .monitors
@@ -885,20 +877,14 @@ impl Controller {
                         .map(|&port| tray::TrayEndpoint {
                             port,
                             name: self.input_label(m.id(), port),
-                            current: m.current_input == Some(port),
                         })
                         .collect(),
                 })
             })
             .collect();
 
-        // Only one monitor shared by exactly two computers has an unambiguous
-        // "the other one", and only then can the menu name the destination.
-        let headline = switch_headline(&groups);
-
         tray::TrayState {
             groups,
-            headline,
             paused: self.is_paused() || !self.config.breaks.enabled,
             break_active: matches!(self.tracker.phase(), Phase::Prompted { .. }),
             tooltip: self.tooltip_text(),
@@ -943,69 +929,19 @@ pub fn apply_theme(pref: config::ThemePref, cx: &mut App) {
 mod tests {
     // Deliberately not `use super::*`: that would pull in GPUI's own `test`
     // attribute macro, which shadows the built-in one and recurses.
-    use super::switch_headline;
-    use crate::tray::{TrayEndpoint, TrayGroup};
-
-    fn group(monitor: &str, endpoints: &[(u8, &str, bool)]) -> TrayGroup {
-        TrayGroup {
-            monitor: monitor.to_string(),
-            endpoints: endpoints
-                .iter()
-                .map(|(port, name, current)| TrayEndpoint {
-                    port: *port,
-                    name: (*name).to_string(),
-                    current: *current,
-                })
-                .collect(),
-        }
-    }
+    use super::flip_destination;
 
     #[test]
-    fn headline_names_the_other_computer() {
-        let setup = vec![group(
-            "27GP950",
-            &[(0x10, "MacBook Pro", true), (0x12, "台式机", false)],
-        )];
-        assert_eq!(switch_headline(&setup).as_deref(), Some("⇄ 切换到 台式机"));
-
-        // From the other side the same pair names the other destination.
-        let flipped = vec![group(
-            "27GP950",
-            &[(0x10, "MacBook Pro", false), (0x12, "台式机", true)],
-        )];
-        assert_eq!(switch_headline(&flipped).as_deref(), Some("⇄ 切换到 MacBook Pro"));
-    }
-
-    #[test]
-    fn headline_declines_when_there_is_no_single_destination() {
-        // Three computers: a flip has no one answer, so the menu names the
-        // action and the hotkey opens the chooser.
-        let three = vec![group(
-            "27GP950",
-            &[
-                (0x10, "MacBook Pro", true),
-                (0x12, "台式机", false),
-                (0x11, "游戏机", false),
-            ],
-        )];
-        assert_eq!(switch_headline(&three), None);
-
-        // Two monitors, one computer each: ambiguous for the same reason.
-        let two_monitors = vec![
-            group("A", &[(0x10, "笔记本", true), (0x12, "台式机", false)]),
-            group("B", &[(0x11, "游戏机", true), (0x0F, "NAS", false)]),
-        ];
-        assert_eq!(switch_headline(&two_monitors), None);
-
-        // Nothing is known about the current input, so there is no honest
-        // destination to name even though the flip still works.
-        let unknown = vec![group(
-            "27GP950",
-            &[(0x10, "MacBook Pro", false), (0x12, "台式机", false)],
-        )];
-        assert_eq!(switch_headline(&unknown), None);
-
-        assert_eq!(switch_headline(&[]), None);
+    fn the_flip_only_needs_the_pair_and_where_the_monitor_is() {
+        let pair = [0x10, 0x12];
+        assert_eq!(flip_destination(pair, Some(0x10)), 0x12);
+        assert_eq!(flip_destination(pair, Some(0x12)), 0x10);
+        // An input outside the pair, or nothing readable at all, lands on the
+        // first. The hotkey reads the monitor fresh at the moment it runs, so
+        // this is the only place the current input is consulted — everything
+        // the user looks at names a destination, never a state.
+        assert_eq!(flip_destination(pair, Some(0x0F)), 0x10);
+        assert_eq!(flip_destination(pair, None), 0x10);
     }
 }
 

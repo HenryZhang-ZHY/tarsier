@@ -12,7 +12,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::config::Hotkeys;
@@ -38,8 +38,6 @@ pub enum Command {
 pub struct TrayEndpoint {
     pub port: u8,
     pub name: String,
-    /// The monitor is showing this computer right now.
-    pub current: bool,
 }
 
 /// The computers sharing one monitor. Split per monitor so a two-monitor
@@ -52,12 +50,14 @@ pub struct TrayGroup {
 
 /// Everything the tray shows, derived by the controller. Compared by value so
 /// the native menu is only rebuilt when something visible changed.
+///
+/// There is deliberately no "which one is live" field. Knowing that would mean
+/// reading the monitor's current input on a timer, and the answer can be
+/// changed by the other computer at any moment — so the menu lists the
+/// destinations and never claims to know where you already are.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrayState {
     pub groups: Vec<TrayGroup>,
-    /// With one monitor and exactly two computers the headline can name the
-    /// destination instead of the action.
-    pub headline: Option<String>,
     pub paused: bool,
     pub break_active: bool,
     pub tooltip: String,
@@ -66,13 +66,13 @@ pub struct TrayState {
 impl TrayState {
     /// Whether the switch list is worth showing at all.
     fn has_switching(&self) -> bool {
-        self.headline.is_some() || !self.groups.is_empty()
+        !self.groups.is_empty()
     }
 
     /// Everything that changes the menu itself. The tooltip ticks once a
     /// minute and must not drag a native menu rebuild along with it.
-    fn menu_part(&self) -> (&[TrayGroup], &Option<String>, bool, bool) {
-        (&self.groups, &self.headline, self.paused, self.break_active)
+    fn menu_part(&self) -> (&[TrayGroup], bool, bool) {
+        (&self.groups, self.paused, self.break_active)
     }
 }
 
@@ -184,19 +184,15 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
             Command::ShowWindow,
         )?;
     } else {
-        // The headline carries the destination when there is exactly one, so
-        // the menu answers "where will this put me" at a glance rather than
-        // naming an action and leaving the user to work it out.
-        let text = state
-            .headline
-            .clone()
-            .unwrap_or_else(|| "⇄ 切换显示器输入…".to_string());
-        push_item(&menu, &mut built, "switch", &text, Command::ToggleInput)?;
+        // The top entry is the hotkey's action, worded as an action: the flip
+        // reads the monitor itself, so this item never has to know where the
+        // monitor currently is.
+        push_item(&menu, &mut built, "switch", "⇄ 切换显示器输入", Command::ToggleInput)?;
 
-        // The explicit list lives one level down, so the everyday menu stays
-        // the same height whether a monitor is shared by two computers or by
-        // five. It also doubles as the place that shows which one is live.
-        let picker = Submenu::new("显示器输入", true);
+        // One level down, every destination by name. Plain items rather than
+        // check marks: a tick would need the current input, and a stale tick
+        // is worse than none.
+        let picker = Submenu::new("切换到", true);
         for group in &state.groups {
             if state.groups.len() > 1 {
                 picker.append(&PredefinedMenuItem::separator())?;
@@ -210,8 +206,8 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
                     endpoint.name,
                     crate::display::mccs::input_source_name(endpoint.port)
                 );
-                let check = CheckMenuItem::with_id(id.clone(), label, true, endpoint.current, None);
-                picker.append(&check)?;
+                let item = MenuItem::with_id(id.clone(), label, true, None);
+                picker.append(&item)?;
                 built.switches.push((id, group.monitor.clone(), endpoint.port));
             }
         }
@@ -332,11 +328,10 @@ fn tray_image(paused: bool) -> Icon {
 mod tests {
     use super::*;
 
-    fn endpoint(port: u8, name: &str, current: bool) -> TrayEndpoint {
+    fn endpoint(port: u8, name: &str) -> TrayEndpoint {
         TrayEndpoint {
             port,
             name: name.to_string(),
-            current,
         }
     }
 
@@ -348,25 +343,24 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_monitor_gets_a_headline_and_a_checked_submenu() {
+    fn a_shared_monitor_gets_an_action_plus_a_named_submenu() {
         let state = TrayState {
             groups: vec![TrayGroup {
                 monitor: "27GP950".to_string(),
-                endpoints: vec![endpoint(0x10, "MacBook Pro", true), endpoint(0x12, "台式机", false)],
+                endpoints: vec![endpoint(0x10, "MacBook Pro"), endpoint(0x12, "台式机")],
             }],
-            headline: Some("⇄ 切换到 台式机".to_string()),
             tooltip: "tarsier".to_string(),
             ..Default::default()
         };
         let (menu, built) = build_menu(&state).unwrap();
 
-        // Every computer is reachable from the menu, and each is wired to a
-        // command that names its own monitor and port.
+        // Every computer is reachable by name, and each is wired to a command
+        // that names its own monitor and port.
         assert_eq!(built.switches.len(), 2);
         assert_eq!(built.switches[0].1, "27GP950");
         assert_eq!(built.switches[0].2, 0x10);
         assert_eq!(built.switches[1].2, 0x12);
-        // The headline flips; the submenu picks explicitly.
+        // The top entry flips; the submenu picks explicitly.
         assert!(built.commands.iter().any(|(_, c)| *c == Command::ToggleInput));
         // The list is nested, so the everyday menu does not grow with the
         // number of computers sharing the monitor.
@@ -374,17 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn three_computers_are_all_listed_without_a_headline() {
+    fn three_computers_are_all_listed() {
         let state = TrayState {
             groups: vec![TrayGroup {
                 monitor: "27GP950".to_string(),
                 endpoints: vec![
-                    endpoint(0x10, "MacBook Pro", true),
-                    endpoint(0x12, "台式机", false),
-                    endpoint(0x11, "游戏机", false),
+                    endpoint(0x10, "MacBook Pro"),
+                    endpoint(0x12, "台式机"),
+                    endpoint(0x11, "游戏机"),
                 ],
             }],
-            headline: None,
             tooltip: "tarsier".to_string(),
             ..Default::default()
         };
@@ -411,14 +404,13 @@ mod tests {
             groups: vec![
                 TrayGroup {
                     monitor: "A".to_string(),
-                    endpoints: vec![endpoint(0x11, "笔记本", true), endpoint(0x12, "台式机", false)],
+                    endpoints: vec![endpoint(0x11, "笔记本"), endpoint(0x12, "台式机")],
                 },
                 TrayGroup {
                     monitor: "B".to_string(),
-                    endpoints: vec![endpoint(0x11, "游戏机", true), endpoint(0x0F, "NAS", false)],
+                    endpoints: vec![endpoint(0x11, "游戏机"), endpoint(0x0F, "NAS")],
                 },
             ],
-            headline: None,
             tooltip: "tarsier".to_string(),
             ..Default::default()
         };

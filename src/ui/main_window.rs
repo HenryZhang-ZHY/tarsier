@@ -532,12 +532,11 @@ impl MainWindow {
 
     /// The input-switching block on the Monitors tab.
     ///
-    /// This page is for looking and acting: it says which computer the monitor
-    /// is showing and offers the switch. Everything editable — names, ports,
-    /// adding and removing computers — lives on the Settings tab, where the
-    /// rest of the configuration already is. Moving all of it would leave this
-    /// page with no way to switch at all, which is why the two halves split
-    /// rather than move.
+    /// One button per computer, each meaning exactly "put the monitor here".
+    /// Nothing here is derived from the monitor's current input: the other
+    /// computer can change that at any moment, so a button built on it would
+    /// be stale until something refreshed it — and a button that says where it
+    /// goes never needs to know where you are.
     fn render_switching(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let id = m.id().to_string();
@@ -590,22 +589,18 @@ impl MainWindow {
         }
 
         let local = c.local_input(m);
-        let current = m.current_input;
         let n = endpoints.len();
-        let label = |port: u8| c.monitor_prefs(&id).label(port);
 
         let rows = endpoints.iter().enumerate().map(|(ix, &port)| {
-            let active = current == Some(port);
             let here = local == Some(port);
+            let id = id.clone();
+            let name = c.monitor_prefs(&id).label(port);
             h_flex()
                 .gap_2()
                 .items_center()
                 .px_2()
                 .py_1()
                 .rounded_md()
-                // The box behind this row is `muted`, so the highlight has to
-                // come back to `background` to be visible at all.
-                .when(active, |el| el.bg(theme.background))
                 .children((n >= 3).then(|| {
                     div()
                         .w(px(16.))
@@ -619,61 +614,26 @@ impl MainWindow {
                         .rounded_full()
                         .bg(if here { theme.success } else { endpoint_color(ix) }),
                 )
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label(port)))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name.clone()))
                 .when(here, |el| {
                     el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
                 })
-                .when(active, |el| {
-                    el.child(mark("正在显示", theme.success, theme.background, theme.border))
-                })
                 .child(div().flex_1())
-                .when(!active, |el| {
-                    let id = id.clone();
-                    el.child(
-                        Button::new(SharedString::from(format!("go-{idx}-{ix}")))
-                            .xsmall()
-                            .ghost()
-                            .label("切到这里")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
-                            })),
-                    )
-                })
+                .child(
+                    Button::new(SharedString::from(format!("go-{idx}-{ix}")))
+                        .small()
+                        .outline()
+                        .label(format!("切换到 {name}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
+                        })),
+                )
         });
 
-        // The one action worth a big button is the one that always works; with
-        // three or more endpoints the hotkey has to ask, so the button does too.
-        let target = current.and_then(|cur| endpoints.iter().copied().find(|p| *p != cur));
-        let action: AnyElement = match (n, target) {
-            (2, Some(port)) => {
-                let id = id.clone();
-                Button::new(SharedString::from(format!("switch-{idx}")))
-                    .primary()
-                    .label(format!("切换到 {}", label(port)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
-                    }))
-                    .into_any_element()
-            }
-            (2, None) => div().into_any_element(),
-            _ => Button::new(SharedString::from(format!("switch-{idx}")))
-                .primary()
-                .label("切换…")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.controller.update(cx, |c, cx| c.open_switch_hud(cx));
-                }))
-                .into_any_element(),
-        };
-
-        let hint = if current.is_none() {
-            "这台显示器不上报当前输入，所以按钮不替你猜目的地 —— 点某一行的「切到这里」就行。".to_string()
-        } else if n == 2 {
-            format!(
-                "按快捷键直接切到 {}，再按一次切回来。",
-                label(target.unwrap_or(endpoints[0]))
-            )
+        let hint = if n == 2 {
+            "按快捷键在两台之间来回切，不用先看现在在哪台。"
         } else {
-            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。".to_string()
+            "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。"
         };
 
         v_flex()
@@ -683,7 +643,6 @@ impl MainWindow {
             .bg(theme.muted)
             .child(header)
             .children(rows)
-            .child(action)
             .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
             // A monitor that reports exactly two inputs works with no setup at
             // all, but the rows are then named after the ports rather than the
@@ -792,11 +751,13 @@ impl MainWindow {
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child(match m.current_input {
+                            // Only a starting point, read once when the monitor was
+                            // enumerated — not a live claim about where it is now.
                             Some(port) => format!(
-                                "显示器当前显示的是 {}，所以它默认算作这台电脑。不对的话点一下换个口。",
+                                "默认把「{}」算作这台电脑，不对的话点一下换个口。",
                                 mccs::input_source_name(port)
                             ),
-                            None => "显示器没有上报当前输入，稍后可以手动指认哪台是这台电脑。".to_string(),
+                            None => "显示器没有上报输入，自己点一下哪个口是这台电脑就行。".to_string(),
                         }),
                 )
                 .child(
@@ -1041,11 +1002,9 @@ impl MainWindow {
         let theme = cx.theme();
         let id = m.id().to_string();
         let local = c.local_input(m);
-        let current = m.current_input;
         let n = endpoints.len();
 
         let rows = endpoints.iter().enumerate().map(|(ix, &port)| {
-            let active = current == Some(port);
             let here = local == Some(port);
             let key = endpoint_key(&id, port);
             let picker_open = self.port_picker.as_deref() == Some(key.as_str());
@@ -1077,10 +1036,6 @@ impl MainWindow {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        // The box behind this row is `muted`, so the
-                        // highlight has to come back to `background` to show
-                        // at all.
-                        .when(active, |el| el.bg(theme.background))
                         .children((n >= 3).then(|| {
                             div()
                                 .w(px(16.))
@@ -1112,9 +1067,6 @@ impl MainWindow {
                         .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
                         .when(here, |el| {
                             el.child(mark("本机", theme.muted_foreground, theme.background, theme.border))
-                        })
-                        .when(active, |el| {
-                            el.child(mark("正在显示", theme.success, theme.background, theme.border))
                         })
                         .child(div().flex_1())
                         .child({

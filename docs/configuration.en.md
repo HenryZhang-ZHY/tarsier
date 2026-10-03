@@ -71,19 +71,21 @@ The computers sharing this monitor, in order, as decimal VCP values:
 
 **The order matters**: with three or more computers it is both the number key in the quick-switch panel and the index shown at the start of each row.
 
-With two, the hotkey is a blind flip — it reads the monitor's current input and switches to the other one — so their order is irrelevant. From three upwards the hotkey opens the quick-switch panel and jumps straight to the chosen port. It deliberately does not cycle: most monitors stop answering this machine's DDC/CI once they are showing a different input, so the second hop would often never arrive.
+With two, the hotkey is a blind flip: it reads the monitor's current input once, when pressed, and switches to the other one. So their order is irrelevant. From three upwards the hotkey opens the quick-switch panel and jumps straight to the chosen port. It deliberately does not cycle: most monitors stop answering this machine's DDC/CI once they are showing a different input, so the second hop would often never arrive.
 
 > Older versions described the same thing as `toggle: [15, 17]`. It is upgraded to `endpoints` on load, and `input_names` is kept as is.
 
 ### `local_input`
 
-Which port **this** computer is plugged into. Display only — it decides which row is marked "this computer" and never influences where a switch goes, because switching always reads the monitor's own reported input.
+Which port **this** computer is plugged into. It only drives the "this computer" mark in the UI: every button in the interface says where it will *send* the monitor, never where the monitor currently is, so switching does not depend on this at all.
 
 ```json
 { "local_input": 16 }
 ```
 
-Leave it out and everything still works; the main window and quick-switch panel just will not show which side you are on.
+Leave it out and everything still works; the UI just will not mark which row is the machine you are sitting at.
+
+> The UI deliberately never shows which computer the monitor is on. That value can only be had by polling the monitor, and the other computer can change it at any moment — so rather than display a state that may already be wrong, tarsier only offers "switch to X" buttons. A button that names its destination cannot lie.
 
 ### `input_names`
 

@@ -52,7 +52,6 @@ struct Entry {
     monitor: String,
     port: u8,
     name: String,
-    current: bool,
 }
 
 fn panel_entries(controller: &Controller) -> Vec<Entry> {
@@ -63,13 +62,11 @@ fn panel_entries(controller: &Controller) -> Vec<Entry> {
             let ports = controller.endpoints(m);
             let id = m.id().to_string();
             let monitor = m.dev.name.clone();
-            let current = m.current_input;
             ports.into_iter().map(move |port| Entry {
                 id: id.clone(),
                 monitor: monitor.clone(),
                 port,
                 name: controller.input_label(&id, port),
-                current: current == Some(port),
             })
         })
         .collect()
@@ -95,7 +92,6 @@ impl Render for SwitchHud {
                 .px_2()
                 .py_1()
                 .rounded_md()
-                .when(entry.current, |el| el.bg(theme.muted))
                 .hover(|s| s.bg(theme.muted))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.controller.update(cx, |c, cx| {
@@ -122,11 +118,7 @@ impl Render for SwitchHud {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(if entry.current {
-                            "正在显示".to_string()
-                        } else {
-                            crate::display::mccs::input_source_name(entry.port)
-                        }),
+                        .child(crate::display::mccs::input_source_name(entry.port)),
                 )
                 .when(multi, |el| {
                     el.child(
