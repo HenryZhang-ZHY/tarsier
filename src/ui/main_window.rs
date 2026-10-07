@@ -2290,30 +2290,36 @@ impl Render for MainWindow {
         // min/max/close hit-testing (snap layouts keep working) on the right.
         // The skin's title-bar colours are the band this sits on.
         //
-        // The strip is centred on the window rather than on the space left over,
-        // which is what the brand and the trailing spacer being equal arms buys.
-        // The caption buttons are drawn outside this row, so their width is
-        // added back on the left — without it the strip sits half of them to the
-        // left of centre, which is exactly the kind of near-miss the eye reads
-        // as a mistake.
+        // The strip is centred on the *window*, not on the space left over. Two
+        // things buy that, and both are exact rather than approximate: the row
+        // carries no padding of its own — including the library's left inset,
+        // which is turned off — and a filler exactly the caption buttons' width
+        // goes in before the tabs to stand in for buttons drawn outside this row.
+        //
+        // Neither the inset nor the brand's own padding may sit *on* a row cell:
+        // a flex item with a zero basis still counts its padding outside that
+        // basis, so 16px of padding on the brand would push the strip 16px
+        // sideways rather than eating into the brand's own space. The inset
+        // therefore lives on a nested box inside the brand cell.
         let title_bar = TitleBar::new()
             .h(px(46.))
-            .pl_4()
+            .pl_0()
             .bg(theme.title_bar)
             .border_color(theme.title_bar_border)
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .items_center()
-                    .child(img(brand_icon()).size(px(22.)))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(skin(cx).weight(Voice::Loud))
-                            .child(skin(cx).case("tarsier")),
-                    ),
+                h_flex().flex_1().min_w_0().items_center().child(
+                    h_flex()
+                        .pl_4()
+                        .gap_2()
+                        .items_center()
+                        .child(img(brand_icon()).size(px(22.)))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(skin(cx).weight(Voice::Loud))
+                                .child(skin(cx).case("tarsier")),
+                        ),
+                ),
             )
             .child(div().w(caption_buttons_width(window)).flex_none())
             .child(tabs)
@@ -2482,11 +2488,11 @@ fn bar_level(score: Option<u8>) -> Level {
 
 /// How much of the title bar the native caption buttons take.
 ///
-/// [`TitleBar`] draws them outside the row its children live in, so the row's
-/// own centre sits half of them to the left of the window's. The caller adds
-/// this width back on the other side to put the tab strip back on the centre
-/// line; the height constant is the one the buttons are drawn at, in the same
-/// library, so the two cannot drift apart.
+/// [`TitleBar`] draws them outside the row its children live in. A filler this
+/// wide goes in before the tabs, so the strip ends up on the window's centre
+/// line rather than half of the buttons to the left of it. The height constant
+/// is the one the buttons are drawn at, in the same library, so the two cannot
+/// drift apart.
 ///
 /// Nothing is drawn on the right on macOS, where the traffic lights live on the
 /// left, and none of it is ours under server-side decorations.
