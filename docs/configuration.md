@@ -2,7 +2,7 @@
 
 **English** · [简体中文](configuration.zh.md) · [Back to README](../README.md)
 
-"Open config folder" on **Settings → Advanced** points at `%APPDATA%\tarsier\`:
+"Settings folder" on **Settings → Advanced** opens `%APPDATA%\tarsier\` (or wherever `TARSIER_HOME` points; see [Building and running](building.md)). A file there that does not parse — a typo from hand-editing, or one written by a newer version — is renamed to `*.json.broken` and tarsier starts from defaults, so the original is never overwritten:
 
 | File | Contents |
 | --- | --- |
@@ -50,7 +50,7 @@ Which visual language the main window is drawn in, also switchable from the UI.
 | Value | Look |
 | --- | --- |
 | `"native"` (the default) | Whatever the component library draws out of the box: the system font, soft corners, quiet greys. This is the look tarsier had before there were skins. |
-| `"neo_brutalism"` | Cream paper, pure ink, thick black strokes, hard offset shadows, and the bundled Space Grotesk display face. |
+| `"neo_brutalism"` | Warm paper, black ink, solid strokes, hard offset shadows, one yellow accent, and the bundled Space Grotesk face. |
 
 A skin is more than a palette: it owns the canvas, the panels, the type and the controls. It is also the **top-level** appearance choice, because a skin can be drawn for only some modes. Neo-brutalism is a single, definitive light palette by design, so choosing it pins the window to light and the Settings tab reports that instead of offering a picker.
 

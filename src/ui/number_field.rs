@@ -11,6 +11,9 @@ use gpui_kit::component::input::{InputEvent, InputState, MaskPattern, NumberInpu
 use gpui_kit::component::*;
 use gpui_kit::*;
 
+/// What a committed value is handed to.
+type Commit = dyn Fn(u32, &mut App);
+
 pub struct NumberField {
     state: Entity<InputState>,
     /// Last committed or synced value, restored when the text doesn't parse.
@@ -52,7 +55,7 @@ impl NumberField {
             state
         });
         let last = Rc::new(Cell::new(value));
-        let on_commit: Rc<dyn Fn(u32, &mut App)> = {
+        let on_commit: Rc<Commit> = {
             let last = last.clone();
             Rc::new(move |v, cx| {
                 last.set(v);

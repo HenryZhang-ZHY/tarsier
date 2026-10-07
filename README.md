@@ -11,11 +11,11 @@ It lives in the tray, draws its own title bar, supports light, dark, and follow-
 The window is drawn in one of two visual languages, switchable on the Settings tab:
 
 - **Default** — the look tarsier has always had: the system font, soft corners, quiet greys.
-- **Neo Brutalism** — cream paper, pure ink, thick black strokes and hard offset shadows, set in a bundled copy of Space Grotesk. Light only, by design: the style is a single definitive light palette rather than a theme that happens to be bright.
+- **Neo Brutalism** — warm paper, black ink, 2px strokes and hard offset shadows, set in a bundled copy of Space Grotesk. Colour is spent sparingly: one yellow accent for the thing to press and "you are here", status colours only for scores, and a colour per computer. Light only, by design.
 
-A skin owns the whole visual language, not just the colours — the canvas and its grid, the panels, the type scale, the badges and the buttons — so the two never mix. Adding one means writing a single file that implements `SkinStyle`; no screen has to be touched, because screens ask for "a card" or "an accent button" rather than for a border width.
+A skin owns the whole visual language, not just the colours — the canvas, the cards, the type weights, the marks and the controls — so the two never mix. Adding one means writing a single file that implements `SkinStyle`; no screen has to be touched, because screens ask for "a card" or "a primary button" rather than for a border width.
 
-The break overlay and the quick-switch panel take the palette from the active skin but keep their own layouts: one is a full-screen dimmer, the other a compact popup, and neither reads as a card.
+The quick-switch panel is drawn in the active skin too. The break overlay keeps its own full-screen dimmer and only takes the skin's typeface.
 
 ## Features
 
@@ -37,7 +37,7 @@ It stays in the tray; double-click the tray icon to open the main window.
 | `Ctrl+Alt+I` | Switch monitor input. Two computers: a blind flip. Three or more: a quick-switch panel, jump by number |
 | `Ctrl+Alt+PageUp` / `PageDown` | Brightness ±10% on every monitor |
 
-The window has three tabs — **Monitors**, **Breaks & stats** and **Settings** — and the Settings tab is split into sections down the left (General, Breaks, Displays, Hotkeys, Advanced), so a setting is one click from its name rather than somewhere in a long column.
+The window has three tabs — **Monitors**, **Breaks** (the timer and the scores it produces) and **Settings** — and the Settings tab is split into sections down the left (General, Breaks, Displays, Hotkeys, Advanced), so a setting is one click from its name rather than somewhere in a long column.
 
 **Hotkeys are recorded in the UI**: click Record next to one, press the combination, and it takes effect immediately. No config file, no restart. Everything else lives on the Settings tab, or in `%APPDATA%\tarsier\config.json`.
 

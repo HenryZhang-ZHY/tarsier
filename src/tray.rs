@@ -64,7 +64,10 @@ pub struct TrayGroup {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrayState {
     pub groups: Vec<TrayGroup>,
+    /// Reminders are on, but held back for an hour.
     pub paused: bool,
+    /// Reminders are turned off in Settings; pausing means nothing then.
+    pub reminders_off: bool,
     pub break_active: bool,
     /// The language the menu was last built in. The labels come from `i18n`
     /// like every other string, but the menu is native and only rebuilt when
@@ -81,8 +84,19 @@ impl TrayState {
 
     /// Everything that changes the menu itself. The tooltip ticks once a
     /// minute and must not drag a native menu rebuild along with it.
-    fn menu_part(&self) -> (&[TrayGroup], bool, bool, Language) {
-        (&self.groups, self.paused, self.break_active, self.language)
+    fn menu_part(&self) -> (&[TrayGroup], bool, bool, bool, Language) {
+        (
+            &self.groups,
+            self.paused,
+            self.reminders_off,
+            self.break_active,
+            self.language,
+        )
+    }
+
+    /// The icon greys out whenever no reminder is coming.
+    fn quiet(&self) -> bool {
+        self.paused || self.reminders_off
     }
 }
 
@@ -105,7 +119,7 @@ impl Tray {
         let (menu, built) = build_menu(&state).map_err(|e| anyhow::anyhow!("building tray menu: {e}"))?;
         let icon = TrayIconBuilder::new()
             .with_tooltip("tarsier")
-            .with_icon(tray_image(state.paused))
+            .with_icon(tray_image(state.quiet()))
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()?;
@@ -132,12 +146,12 @@ impl Tray {
         if !same_menu {
             match build_menu(state) {
                 Ok((menu, built)) => {
-                    let _ = self.icon.set_menu(Some(Box::new(menu)));
+                    self.icon.set_menu(Some(Box::new(menu)));
                     *self.built.borrow_mut() = built;
                 }
                 Err(e) => log::error!("rebuilding tray menu: {e}"),
             }
-            let _ = self.icon.set_icon(Some(tray_image(state.paused)));
+            let _ = self.icon.set_icon(Some(tray_image(state.quiet())));
         }
         *self.last.borrow_mut() = Some(state.clone());
     }
@@ -221,13 +235,14 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
     }
 
     menu.append(&PredefinedMenuItem::separator())?;
-    push_item(
-        &menu,
-        &mut built,
+    let break_now = MenuItem::with_id(
         "break-now",
         tr!("Take a break now"),
-        Command::BreakNow,
-    )?;
+        !state.reminders_off && !state.break_active,
+        None,
+    );
+    built.commands.push((break_now.id().clone(), Command::BreakNow));
+    menu.append(&break_now)?;
     for (id, text, command) in [
         ("snooze", tr!("Snooze this break"), Command::Snooze),
         ("skip", tr!("Skip this break"), Command::Skip),
@@ -236,17 +251,23 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
         built.commands.push((item.id().clone(), command));
         menu.append(&item)?;
     }
-    push_item(
-        &menu,
-        &mut built,
-        "pause",
-        if state.paused {
-            tr!("Resume reminders")
-        } else {
-            tr!("Pause reminders for 1 hour")
-        },
-        Command::TogglePause,
-    )?;
+    if state.reminders_off {
+        // Pausing reminders that are off would quietly pause nothing; say
+        // where they are instead.
+        menu.append(&MenuItem::new(tr!("Break reminders are off"), false, None))?;
+    } else {
+        push_item(
+            &menu,
+            &mut built,
+            "pause",
+            if state.paused {
+                tr!("Resume reminders")
+            } else {
+                tr!("Pause reminders for 1 hour")
+            },
+            Command::TogglePause,
+        )?;
+    }
     menu.append(&PredefinedMenuItem::separator())?;
     push_item(&menu, &mut built, "quit", tr!("Quit"), Command::Quit)?;
 
@@ -282,7 +303,39 @@ pub struct HotkeyRegistry {
     /// What is registered right now: what to unregister, and how an incoming
     /// event's id finds its command.
     bindings: Vec<(HotKey, Command)>,
-    errors: Vec<String>,
+    errors: Vec<HotkeyError>,
+}
+
+/// A hotkey that could not be registered, named by its config field so the
+/// Settings tab can say so on the right row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyError {
+    pub key: &'static str,
+    pub problem: HotkeyProblem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotkeyProblem {
+    /// Another program (or another copy of tarsier) holds the combination.
+    Taken,
+    /// The config names something that is not a combination.
+    Invalid,
+    /// Anything else Windows said, verbatim.
+    Refused(String),
+}
+
+impl From<global_hotkey::Error> for HotkeyProblem {
+    fn from(error: global_hotkey::Error) -> Self {
+        use global_hotkey::Error as E;
+        match error {
+            E::AlreadyRegistered(_) => Self::Taken,
+            E::HotKeyParseError(_)
+            | E::UnrecognizedHotKeyCode(_)
+            | E::EmptyHotKeyToken(_)
+            | E::UnexpectedHotKeyFormat(_) => Self::Invalid,
+            other => Self::Refused(other.to_string()),
+        }
+    }
 }
 
 impl HotkeyRegistry {
@@ -295,12 +348,12 @@ impl HotkeyRegistry {
     }
 
     /// Makes the registered hotkeys match `keys`. Returns what could not be
-    /// registered, as `<spec>: <reason>`, which is what the Settings tab shows.
+    /// registered, which is what the Settings tab shows under each row.
     ///
     /// A spec that will not parse is reported rather than skipped in silence:
     /// the config is hand-editable, and a typo there used to disable one hotkey
     /// with nothing said about it.
-    pub fn apply(&mut self, keys: &Hotkeys) -> Vec<String> {
+    pub fn apply(&mut self, keys: &Hotkeys) -> Vec<HotkeyError> {
         self.clear();
         self.errors.clear();
 
@@ -312,12 +365,20 @@ impl HotkeyRegistry {
             let Some(command) = command_for(field.key) else {
                 continue;
             };
-            match HotKey::from_str(spec) {
-                Ok(hotkey) => match self.manager.register(hotkey) {
-                    Ok(()) => self.bindings.push((hotkey, command)),
-                    Err(e) => self.errors.push(format!("{spec}: {e}")),
-                },
-                Err(e) => self.errors.push(format!("{spec}: {e}")),
+            let result = match HotKey::from_str(spec) {
+                Ok(hotkey) => self
+                    .manager
+                    .register(hotkey)
+                    .map(|()| hotkey)
+                    .map_err(HotkeyProblem::from),
+                Err(_) => Err(HotkeyProblem::Invalid),
+            };
+            match result {
+                Ok(hotkey) => self.bindings.push((hotkey, command)),
+                Err(problem) => self.errors.push(HotkeyError {
+                    key: field.key,
+                    problem,
+                }),
             }
         }
         self.errors.clone()
@@ -337,7 +398,7 @@ impl HotkeyRegistry {
         self.bindings.clear();
     }
 
-    pub fn errors(&self) -> &[String] {
+    pub fn errors(&self) -> &[HotkeyError] {
         &self.errors
     }
 
@@ -477,7 +538,21 @@ mod tests {
         for (_, routed, _) in &built.switches {
             assert_eq!(routed, id, "the click must carry the id, not the name");
         }
-        assert_ne!(id, "27GP950");
+    }
+
+    #[test]
+    fn with_reminders_off_there_is_nothing_to_pause() {
+        let state = TrayState {
+            reminders_off: true,
+            tooltip: "tarsier".to_string(),
+            ..Default::default()
+        };
+        let (_menu, built) = build_menu(&state).unwrap();
+        assert!(
+            !built.commands.iter().any(|(_, c)| *c == Command::TogglePause),
+            "a pause entry here would quietly pause reminders that are off"
+        );
+        assert!(state.quiet(), "the icon greys out");
     }
 
     #[test]

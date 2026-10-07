@@ -134,10 +134,7 @@ impl Stats {
         let good = |s: Option<u8>| s.is_some_and(|s| s >= GOOD_SCORE);
         let mut streak = u32::from(good(today_score));
         let mut date = today;
-        loop {
-            let Some(prev) = date.checked_sub_days(Days::new(1)) else {
-                break;
-            };
+        while let Some(prev) = date.checked_sub_days(Days::new(1)) {
             match self.days.get(&prev) {
                 Some(day) if good(day.score()) => streak += 1,
                 // Days without any computer use don't break a streak.

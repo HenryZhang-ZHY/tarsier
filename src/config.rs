@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use gpui_kit::WindowAppearance;
@@ -57,6 +57,15 @@ impl ThemePref {
 
     pub const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::System];
 
+    /// Stable across languages, for element ids.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        }
+    }
+
     /// The mode to apply, given what the system currently reports. GPUI maps
     /// Windows' `AppsUseLightTheme` to a `WindowAppearance`, so `System` needs
     /// no registry reading of our own.
@@ -78,19 +87,24 @@ impl Config {
     /// order is meaningful once a monitor is shared by three computers.
     pub fn migrate(&mut self) {
         for prefs in self.monitors.values_mut() {
-            if prefs.endpoints.is_empty()
-                && let Some([a, b]) = prefs.toggle.take()
-            {
-                prefs.endpoints.push(a);
-                if b != a {
-                    prefs.endpoints.push(b);
-                }
+            // The legacy key is consumed whether or not it is still needed, so
+            // it is never written back.
+            let Some([a, b]) = prefs.toggle.take() else {
+                continue;
+            };
+            if !prefs.endpoints.is_empty() {
+                continue;
             }
-            // `local_input` did not exist; the toggle's first slot is the best
-            // guess at which port this computer was on, and it is only ever
-            // used for display, so a wrong guess costs nothing.
+            prefs.endpoints.push(a);
+            if b != a {
+                prefs.endpoints.push(b);
+            }
+            // `local_input` did not exist then. The pair's first slot is the
+            // best guess, and it only affects what is shown. Only an upgrade
+            // guesses: a monitor whose local port was cleared on purpose keeps
+            // it cleared.
             if prefs.local_input.is_none() {
-                prefs.local_input = prefs.endpoints.first().copied();
+                prefs.local_input = Some(a);
             }
         }
     }
@@ -229,10 +243,28 @@ impl Hotkeys {
             return;
         }
         for field in HOTKEY_FIELDS {
-            if field.key != key && (field.get)(self).trim().eq_ignore_ascii_case(&spec) {
+            if field.key != key && same_combination((field.get)(self), &spec) {
                 (field.set)(self, String::new());
             }
         }
+    }
+}
+
+/// Whether two specs name the same key combination, however they are spelled:
+/// `alt+ctrl+i` and `Control+Alt+I` are one hotkey to Windows. Specs that do
+/// not parse are compared as text.
+fn same_combination(a: &str, b: &str) -> bool {
+    use std::str::FromStr as _;
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    match (
+        global_hotkey::hotkey::HotKey::from_str(a),
+        global_hotkey::hotkey::HotKey::from_str(b),
+    ) {
+        (Ok(a), Ok(b)) => a.id() == b.id(),
+        _ => a.eq_ignore_ascii_case(b),
     }
 }
 
@@ -333,11 +365,43 @@ pub struct SwitchingExport {
 
 pub const SWITCHING_EXPORT_VERSION: u32 = 1;
 
+/// The command-line flag with the same effect as [`HOME_VAR`]: `--home <dir>`.
+/// Autostart passes it, because a Run-key entry cannot set the environment.
+pub const HOME_ARG: &str = "--home";
+
+/// The data directory asked for with [`HOME_VAR`], if any.
+pub fn home_override() -> Option<PathBuf> {
+    std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The environment variable that moves tarsier's files somewhere other than
+/// `%APPDATA%\tarsier`: a portable copy, or a development build that must not
+/// touch the installed one's settings.
+pub const HOME_VAR: &str = "TARSIER_HOME";
+
 pub fn data_dir() -> PathBuf {
+    if let Some(home) = home_override() {
+        return home;
+    }
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("tarsier")
+}
+
+/// Tells instances with different data directories apart, so each one gets
+/// its own single-instance lock. Empty for the default directory, which keeps
+/// the lock name every earlier version used.
+pub fn instance_scope() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    match home_override() {
+        Some(home) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            home.hash(&mut hasher);
+            format!("-{:016x}", hasher.finish())
+        }
+        None => String::new(),
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -348,26 +412,38 @@ pub fn stats_path() -> PathBuf {
     data_dir().join("stats.json")
 }
 
-/// Loads a JSON file, falling back to defaults when missing or unreadable.
-pub fn load<T: DeserializeOwned + Default>(path: &PathBuf) -> T {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            log::warn!("ignoring malformed {}: {e}", path.display());
-            T::default()
-        }),
-        Err(_) => T::default(),
-    }
+/// Loads a JSON file, falling back to defaults when it is missing.
+///
+/// A file that is there but does not parse — edited by hand, or written by a
+/// newer version — is moved aside to `<name>.broken` first. Starting from
+/// defaults and saving over it on the next change would destroy the user's
+/// settings or history for good.
+pub fn load<T: DeserializeOwned + Default>(path: &Path) -> T {
+    let Ok(text) = fs::read_to_string(path) else {
+        return T::default();
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        let aside = path.with_extension("json.broken");
+        match fs::rename(path, &aside) {
+            Ok(()) => log::warn!("{} is malformed ({e}); kept it as {}", path.display(), aside.display()),
+            Err(move_error) => log::error!(
+                "{} is malformed ({e}) and could not be moved aside: {move_error}",
+                path.display()
+            ),
+        }
+        T::default()
+    })
 }
 
 /// Writes atomically (temp file + rename) so a crash never leaves half a file.
 ///
-/// Every step names the path it was working on: this is the one write in the
-/// program that can be turned down by something outside it — an antivirus, a
-/// policy, a directory that is not what it looks like — and "access denied" with
-/// no path is a bug report nobody can act on.
-pub fn save<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    let dir = data_dir();
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+/// Every error names the path it concerns: an antivirus or a policy can refuse
+/// this write, and "access denied" without a path is a bug report nobody can act
+/// on.
+pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(value)?).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("saving {}", path.display()))
@@ -399,16 +475,40 @@ mod tests {
         keys.set_spec("break_now", "ctrl+alt+I".into());
         assert_eq!(keys.break_now, "ctrl+alt+I");
         assert_eq!(keys.toggle_input, "");
-        // Case and padding are not what makes two hotkeys the same; the parsed
-        // combination is, and that ignores both.
-        keys.set_spec("brightness_up", " ctrl+alt+i ".into());
+        // Case, padding and modifier order do not make two hotkeys different.
+        keys.set_spec("brightness_up", " alt+control+i ".into());
         assert_eq!(keys.break_now, "");
 
         // Clearing one touches nothing else.
         keys.set_spec("toggle_input", "ctrl+alt+K".into());
         keys.set_spec("toggle_input", String::new());
         assert_eq!(keys.toggle_input, "");
-        assert_eq!(keys.brightness_up, "ctrl+alt+i", "stored without the padding");
+        assert_eq!(keys.brightness_up, "alt+control+i", "stored without the padding");
+    }
+
+    #[test]
+    fn save_creates_its_directory_and_load_reads_it_back() {
+        let dir = std::env::temp_dir().join(format!("tarsier-config-test-{}", std::process::id()));
+        let path = dir.join("nested").join("config.json");
+        let mut cfg = Config::default();
+        cfg.breaks.work_minutes = 42;
+        save(&path, &cfg).unwrap();
+        assert_eq!(load::<Config>(&path), cfg);
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the temp file is renamed away"
+        );
+
+        // A file someone mangled by hand is not fatal, and it is not lost
+        // either: it is moved aside before anything can save over it.
+        fs::write(&path, "{ not json").unwrap();
+        assert_eq!(load::<Config>(&path), Config::default());
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(path.with_extension("json.broken")).unwrap(),
+            "{ not json"
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -488,6 +588,19 @@ mod tests {
             serde_json::from_str(r#"{"monitors":{"m":{"endpoints":[16,18,17],"toggle":[15,17]}}}"#).unwrap();
         cfg.migrate();
         assert_eq!(cfg.monitors["m"].endpoints, vec![16, 18, 17], "configured list wins");
+        assert_eq!(
+            cfg.monitors["m"].toggle, None,
+            "the legacy key is dropped even when unused"
+        );
+        let once = cfg.clone();
+        cfg.migrate();
+        assert_eq!(cfg, once, "a second run changes nothing");
+
+        // A local port cleared on purpose (its computer was removed) stays
+        // cleared across restarts.
+        let mut cfg: Config = serde_json::from_str(r#"{"monitors":{"m":{"endpoints":[16,18,17]}}}"#).unwrap();
+        cfg.migrate();
+        assert_eq!(cfg.monitors["m"].local_input, None);
         // A degenerate old pair must not produce a duplicated endpoint.
         let mut cfg: Config = serde_json::from_str(r#"{"monitors":{"m":{"toggle":[15,15]}}}"#).unwrap();
         cfg.migrate();

@@ -20,11 +20,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
 };
-use windows::core::w;
+use windows::core::HSTRING;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_VALUE: &str = "tarsier";
 pub const BACKGROUND_ARG: &str = "--background";
+
+/// The Run-key value this copy owns. A copy with its own data directory gets a
+/// value of its own, so turning autostart on or off there never touches the
+/// installed copy's entry.
+fn run_value() -> String {
+    format!("tarsier{}", crate::config::instance_scope())
+}
 
 /// This computer's own name, used as the default label for the machine the
 /// user is sitting at. There is no way to learn what the *other* computers on a
@@ -72,7 +78,7 @@ pub fn user_is_busy() -> bool {
 /// pressing the hotkey and changing your mind costs nothing.
 pub fn foreground_window() -> Option<isize> {
     let hwnd = unsafe { GetForegroundWindow() };
-    (!hwnd.is_invalid()).then(|| hwnd.0 as isize)
+    (!hwnd.is_invalid()).then_some(hwnd.0 as isize)
 }
 
 /// Gives focus back to a window remembered by [`foreground_window`]. Windows
@@ -107,17 +113,22 @@ pub fn make_click_through(hwnd: isize) {
 pub fn autostart_enabled() -> bool {
     windows_registry::CURRENT_USER
         .open(RUN_KEY)
-        .and_then(|k| k.get_string(RUN_VALUE))
+        .and_then(|k| k.get_string(run_value()))
         .is_ok()
 }
 
 pub fn set_autostart(enabled: bool) -> Result<()> {
     let key = windows_registry::CURRENT_USER.create(RUN_KEY)?;
+    let value = run_value();
     if enabled {
         let exe = std::env::current_exe()?;
-        key.set_string(RUN_VALUE, format!("\"{}\" {BACKGROUND_ARG}", exe.display()))?;
-    } else if key.get_string(RUN_VALUE).is_ok() {
-        key.remove_value(RUN_VALUE)?;
+        let mut command = format!("\"{}\" {BACKGROUND_ARG}", exe.display());
+        if let Some(home) = crate::config::home_override() {
+            command.push_str(&format!(" {} \"{}\"", crate::config::HOME_ARG, home.display()));
+        }
+        key.set_string(&value, command)?;
+    } else if key.get_string(&value).is_ok() {
+        key.remove_value(&value)?;
     }
     Ok(())
 }
@@ -135,9 +146,16 @@ pub enum Instance {
 
 /// Claims the single-instance mutex. When primary, `on_activate` receives a
 /// message every time a later launch wants the window shown.
-pub fn claim_single_instance(on_activate: Sender<()>) -> Instance {
+///
+/// `scope` separates instances that keep their files apart (see
+/// [`crate::config::HOME_VAR`]): a development build with its own data
+/// directory must be able to run beside the installed copy rather than just
+/// bringing the installed copy's window forward.
+pub fn claim_single_instance(scope: &str, on_activate: Sender<()>) -> Instance {
+    let mutex_name = HSTRING::from(format!(r"Local\TarsierSingleInstance{scope}"));
+    let event_name = HSTRING::from(format!(r"Local\TarsierActivate{scope}"));
     unsafe {
-        let mutex = CreateMutexW(None, true, w!("Local\\TarsierSingleInstance"));
+        let mutex = CreateMutexW(None, true, &mutex_name);
         let already = GetLastError() == ERROR_ALREADY_EXISTS;
         let Ok(mutex) = mutex else {
             return Instance::Primary(SingleInstance {
@@ -145,14 +163,14 @@ pub fn claim_single_instance(on_activate: Sender<()>) -> Instance {
             });
         };
         if already {
-            if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, w!("Local\\TarsierActivate")) {
+            if let Ok(event) = OpenEventW(EVENT_MODIFY_STATE, false, &event_name) {
                 let _ = SetEvent(event);
                 let _ = CloseHandle(event);
             }
             let _ = CloseHandle(mutex);
             return Instance::Secondary;
         }
-        if let Ok(event) = CreateEventW(None, false, false, w!("Local\\TarsierActivate")) {
+        if let Ok(event) = CreateEventW(None, false, false, &event_name) {
             let event = event.0 as usize;
             std::thread::spawn(move || {
                 let event = HANDLE(event as _);

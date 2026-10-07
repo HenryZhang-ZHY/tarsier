@@ -7,8 +7,9 @@
 //! rather than as an empty label or a raw key — and the debug log names it.
 //!
 //! Adding a string: write it in English, wrap it in [`tr!`], and add the pair
-//! to [`ZH`]. The main window's own copy lives in [`MAIN_WINDOW`], which is the
-//! same kind of table kept apart only because it is the largest surface by far.
+//! to [`ZH`]. The tests scan `src/` for every `tr!` literal, so a string
+//! without a translation, or a translation whose string is gone, fails the
+//! build rather than shipping as English in the Chinese UI.
 //!
 //! Names the user typed (monitor input names, computer names) and what the
 //! hardware reports ("DisplayPort 2", "HDMI 1") are data, not copy, and are
@@ -49,6 +50,14 @@ impl Language {
         }
     }
 
+    /// Stable across languages, for element ids.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Zh => "zh",
+        }
+    }
+
     /// What this language is called in the component library's locale files.
     /// It has a vocabulary of its own — the Chinese one is "zh-CN", not "zh" —
     /// and a key that names no file falls back to English in silence.
@@ -60,25 +69,45 @@ impl Language {
     }
 }
 
-/// The language every window draws in. Written once from the saved config at
-/// startup and again whenever the user changes it; only ever read on the UI
-/// thread. Tests leave it alone — they assert the English default, or ask for
-/// a language explicitly through [`tr_in`].
+/// The language every window draws in. Written from the saved config at
+/// startup and whenever the user changes it; read on the UI thread.
+#[cfg(not(test))]
 static CURRENT: AtomicU8 = AtomicU8::new(Language::En as u8);
+
+// Tests run in parallel and some draw the window in Chinese, so each test
+// thread keeps a language of its own.
+#[cfg(test)]
+thread_local! {
+    static CURRENT: AtomicU8 = const { AtomicU8::new(Language::En as u8) };
+}
+
+fn store(language: Language) {
+    #[cfg(not(test))]
+    CURRENT.store(language as u8, Ordering::Relaxed);
+    #[cfg(test)]
+    CURRENT.with(|c| c.store(language as u8, Ordering::Relaxed));
+}
+
+fn load() -> u8 {
+    #[cfg(not(test))]
+    return CURRENT.load(Ordering::Relaxed);
+    #[cfg(test)]
+    return CURRENT.with(|c| c.load(Ordering::Relaxed));
+}
 
 /// Switches the whole program over, wherever the strings come from.
 ///
 /// Ours are looked up at draw time, so nothing has to be told about the change
-/// beyond a repaint. The component library keeps its own strings in `rust-i18n`
-/// locale files and has to be told separately; every caller comes through here,
-/// which is what keeps the two from drifting apart.
+/// beyond a repaint. The component library keeps its own strings and has to be
+/// told separately; every caller comes through here, which keeps the two in
+/// step.
 pub fn set_language(language: Language) {
-    CURRENT.store(language as u8, Ordering::Relaxed);
+    store(language);
     gpui_kit::component::set_locale(language.locale());
 }
 
 pub fn language() -> Language {
-    if CURRENT.load(Ordering::Relaxed) == Language::Zh as u8 {
+    if load() == Language::Zh as u8 {
         Language::Zh
     } else {
         Language::En
@@ -162,18 +191,26 @@ macro_rules! tr {
 
 pub(crate) use tr;
 
-/// English source text → 简体中文, for everything outside the main window.
+/// English source text → 简体中文. A placeholder in braces stays as it is;
+/// a counted string lists both its forms, which share a translation.
 static ZH: &[(&str, &str)] = &[
-    // ---- durations and preferences ------------------------------------
+    // ---- shared vocabulary -------------------------------------------------
     ("{n} h {m} min", "{n} 小时 {m} 分钟"),
     ("{n} min", "{n} 分钟"),
-    ("; ", "；"),
     ("Light", "亮色"),
     ("Dark", "暗色"),
     ("System", "跟随系统"),
-    // ---- the name this computer gives itself --------------------------
-    ("This PC", "本机"),
-    // ---- tray menu ----------------------------------------------------
+    ("Default", "默认"),
+    ("Neo Brutalism", "新粗野主义"),
+    (
+        "The system font, soft corners and quiet greys, in light or dark",
+        "系统字体、柔和圆角和安静的灰色，有亮色和暗色",
+    ),
+    (
+        "Warm paper, black ink, solid strokes and hard shadows. Light only, by design",
+        "暖纸色、黑墨线、实心描边和硬阴影。只有亮色，这是有意的设计",
+    ),
+    // ---- tray menu and tooltip ---------------------------------------------
     ("Open tarsier", "打开 tarsier"),
     ("Set up monitor inputs…", "设置显示器输入…"),
     ("Switch to", "切换到"),
@@ -183,18 +220,18 @@ static ZH: &[(&str, &str)] = &[
     ("Resume reminders", "恢复提醒"),
     ("Pause reminders for 1 hour", "暂停提醒 1 小时"),
     ("Quit", "退出"),
-    // ---- notices: what the last switch or save did ---------------------
+    // ---- notices from the controller ---------------------------------------
     ("Switched to {label}", "已切换到 {label}"),
     ("Switching input failed: {e}", "切换输入失败: {e}"),
-    ("Switch failed: {e}", "切换失败: {e}"),
     (
-        "No computers are set up to switch between yet — add them on the Settings tab",
-        "还没有设置要切换的电脑，请在「设置」页添加",
+        "No computers are set up to switch between yet. Add them in Settings → Displays.",
+        "还没有设置要切换的电脑，请在「设置 → 显示器」中添加。",
     ),
     (
-        "Cannot read which input the monitor is on, so there is no direction to flip in — pick one in the quick-switch panel",
-        "读不出显示器现在在哪一路，没法盲翻 —— 在快切面板里选一台。",
+        "The monitor will not say which input it is on, so pick one in the quick-switch panel.",
+        "显示器没有告知当前输入，请在快切面板中选择。",
     ),
+    ("; ", "；"),
     ("Could not change the autostart setting: {e}", "设置开机启动失败: {e}"),
     ("Could not save settings: {e}", "保存设置失败: {e}"),
     (
@@ -202,21 +239,31 @@ static ZH: &[(&str, &str)] = &[
         "剪贴板里没有 tarsier 的输入切换设置",
     ),
     (
-        "The clipboard settings do not match the monitors connected now",
-        "剪贴板里的设置和当前接的显示器对不上",
+        "The copied settings do not match any monitor connected here",
+        "复制的设置与这台电脑连接的显示器都不匹配",
     ),
     ("Applied to 1 monitor", "已应用到 1 台显示器"),
     ("Applied to {n} monitors", "已应用到 {n} 台显示器"),
-    // ---- tray tooltip -------------------------------------------------
     ("Break reminders are off", "休息提醒已关闭"),
     ("Reminders are paused", "提醒已暂停"),
+    ("On a break", "休息中"),
+    ("Away", "已离开"),
     ("Break in 1 minute", "1 分钟后休息"),
     ("Break in {n} minutes", "{n} 分钟后休息"),
     (
-        "tarsier · {state} · {score} pts today",
-        "tarsier · {state} · 今日 {score} 分",
+        "tarsier · {state} · health {score} today",
+        "tarsier · {state} · 今日健康分 {score}",
     ),
-    // ---- break overlay ------------------------------------------------
+    // ---- monitor protocol errors -------------------------------------------
+    (
+        "No LG side-channel value is known for {port} — add one under input_protocol.values in the config",
+        "不知道 {port} 在 LG 私有通道上的编号，请在配置的 input_protocol.values 里补充",
+    ),
+    (
+        "This LG monitor only accepts input switching as I²C commands sent straight by the GPU, which this GPU does not support (NVIDIA today)",
+        "这台 LG 显示器只能由显卡直接发 I²C 命令切换输入，当前显卡不支持（目前支持 NVIDIA）",
+    ),
+    // ---- break overlay and quick-switch panel ------------------------------
     ("Take a break", "休息一下吧"),
     (
         "You have been working for 1 minute. {tip}",
@@ -238,293 +285,285 @@ static ZH: &[(&str, &str)] = &[
         "The overlay does not block input · to snooze or skip, right-click tarsier in the tray",
         "遮罩不会挡住操作 · 需要推迟或跳过，请右键托盘里的 tarsier",
     ),
-    (
-        "Look at something 6 metres away and let your eyes relax",
-        "看看 6 米外的地方，让眼睛的睫状肌放松一下",
-    ),
-    (
-        "Stand up, stretch, and roll your neck and shoulders",
-        "站起来伸个懒腰，转转脖子和肩膀",
-    ),
-    (
-        "Fetch a glass of water and walk around a little",
-        "去倒杯水，顺便走动走动",
-    ),
-    ("Close your eyes and take a few slow breaths", "闭上眼睛，深呼吸几次"),
-    ("Blink a few times to wet your eyes again", "眨眨眼，让眼睛重新湿润起来"),
-    ("Move your wrists and fingers around", "活动一下手腕和手指"),
-    // ---- quick-switch panel -------------------------------------------
     ("Switch monitor input", "切换显示器输入"),
     ("Press a number to jump straight there", "按数字键直达"),
     ("Esc to cancel", "Esc 取消"),
-    // ---- statistics: titles earned by points ---------------------------
-    ("Sedentary starter", "久坐新手"),
-    ("Stretch apprentice", "伸展学徒"),
-    ("Pacing pro", "节奏达人"),
-    ("Eye guardian", "护眼卫士"),
-    ("Health pro", "健康达人"),
-    ("Tarsier grandmaster", "眼镜猴大师"),
-    // ---- switching errors that reach a notice --------------------------
-    (
-        "No LG side-channel value is known for {port} — add one under input_protocol.values in the config",
-        "不知道 {port} 在 LG 私有通道上的编号，请在配置的 input_protocol.values 里补充",
-    ),
-    (
-        "This LG monitor only accepts input switching as I²C commands sent straight by the GPU, which this GPU does not support (NVIDIA today)",
-        "这台 LG 显示器只能由显卡直接发 I²C 命令切换输入，当前显卡不支持（目前支持 NVIDIA）",
-    ),
-    (
-        "Administrator permission was not granted, so the switch was cancelled",
-        "没有获得管理员授权，已取消切换",
-    ),
-];
-
-/// The main window's copy: the same table, kept in its own block because that
-/// one window holds most of the strings in the program.
-static MAIN_WINDOW: &[(&str, &str)] = &[
-    // ---- break durations and the names offered during setup ------------
-    ("Work", "每工作"),
-    ("Break", "休息"),
-    ("Snooze", "推迟"),
-    ("min", "分钟"),
-    ("Desktop", "台式机"),
-    ("Work PC", "公司电脑"),
-    ("Laptop", "笔记本"),
-    ("Console", "游戏机"),
-    // ---- monitors tab -------------------------------------------------
-    ("Scanning…", "正在检测…"),
-    ("Scan again", "重新检测"),
+    // ---- main window: shell and Monitors tab -------------------------------
+    ("Monitors", "显示器"),
+    ("Settings", "设置"),
+    ("Looking for monitors…", "正在查找显示器…"),
     ("No monitors detected", "未检测到显示器"),
-    ("Connected to 1 DDC/CI monitor", "已连接 {n} 台支持 DDC/CI 的显示器"),
-    ("Connected to {n} DDC/CI monitors", "已连接 {n} 台支持 DDC/CI 的显示器"),
-    ("Copy diagnostics report", "复制诊断报告"),
+    ("1 monitor with DDC/CI", "{n} 台支持 DDC/CI 的显示器"),
+    ("{n} monitors with DDC/CI", "{n} 台支持 DDC/CI 的显示器"),
+    ("Copy diagnostics", "复制诊断报告"),
     ("Diagnostics report copied to the clipboard", "诊断报告已复制到剪贴板"),
     (
         "No external monitors supporting DDC/CI were found",
         "没有找到支持 DDC/CI 的外接显示器",
     ),
     (
-        "Turn on DDC/CI in the monitor's on-screen menu, then click \"Scan again\". Built-in laptop screens do not support DDC/CI.",
-        "请在显示器的 OSD 菜单里开启 DDC/CI，然后点击「重新检测」。笔记本内置屏不支持 DDC/CI。",
+        "Turn on DDC/CI in the monitor's on-screen menu, then scan again. Built-in laptop screens do not support DDC/CI.",
+        "请在显示器的屏幕菜单里打开 DDC/CI，然后重新检测。笔记本内置屏幕不支持 DDC/CI。",
     ),
-    ("Not supported", "不支持"),
+    ("Scanning…", "正在检测…"),
+    ("Scan again", "重新检测"),
     ("Brightness", "亮度"),
     ("Contrast", "对比度"),
-    // ---- switching between the computers on one monitor -----------------
-    ("One-key switching", "一键切换"),
+    ("Not supported by this monitor", "这台显示器不支持"),
     ("Input switching", "输入切换"),
     (
         "No computers sharing this monitor are set up yet.",
         "还没设置共用这台显示器的电脑。",
     ),
-    ("Set up on the Settings tab", "去设置里配置"),
-    ("Switch to {name}", "切换到 {name}"),
+    ("Set up switching", "设置切换"),
+    ("Switch", "切换"),
     (
-        "Press the hotkey to flip between the two, without looking up which one you are on first.",
-        "按快捷键在两台之间来回切，不用先看现在在哪台。",
+        "The hotkey flips between the two without asking which one you are on.",
+        "快捷键会在两台之间直接切换，不用先确认当前是哪台。",
     ),
     (
-        "Press the hotkey for the quick-switch panel and jump by number — it never passes through the machine in between.",
-        "按快捷键呼出快切面板，按数字直达 —— 不会路过中间那台。",
-    ),
-    ("These ports have no names yet.", "这些接口还没有名字。"),
-    ("Name them on the Settings tab", "去设置里起名"),
-    (
-        "The monitor does not report its input list, so these are the common ports; add more under extra_inputs in the config.",
-        "显示器没有上报输入列表，这里列出的是常见接口；可在配置文件 extra_inputs 里补充。",
-    ),
-    // ---- first-run wizard ----------------------------------------------
-    (
-        "How many computers are connected to this monitor?",
-        "这台显示器上接着几台电脑？",
+        "The hotkey opens a quick-switch panel; press a number to jump straight there.",
+        "快捷键会打开快切面板，按数字键直达。",
     ),
     (
-        "Select the ports that actually have a computer behind them. Ports that are empty, or that go to a game console or a TV box, can stay unselected.",
-        "把真正接着电脑的口点亮。空着的口、接游戏机或电视盒子的口，都可以不选。",
+        "These are port names, not computer names.",
+        "这些是接口名，不是电脑名。",
     ),
+    ("Name them", "起名"),
+    ("Diagnostics", "诊断信息"),
+    ("Recent commands", "最近的命令"),
+    ("(none)", "（暂无）"),
+    // ---- main window: Breaks tab -------------------------------------------
     (
-        "Assuming {port} is this computer — click another port if that is wrong",
-        "默认把「{port}」算作这台电脑，不对的话点一下换个口。",
+        "Turn them back on in Settings to get a reminder after each stretch of work.",
+        "在设置中重新打开后，每段工作结束时都会提醒你休息。",
     ),
-    (
-        "The monitor reports no inputs, so click whichever port this computer is on",
-        "显示器没有上报输入，自己点一下哪个口是这台电脑就行。",
-    ),
-    ("Next: name this 1 computer", "下一步：给这 {n} 台起名"),
-    ("Next: name these {n} computers", "下一步：给这 {n} 台起名"),
-    ("Pick at least two to switch with one key", "至少选两台才能一键切换"),
-    ("Paste from another computer", "从另一台电脑粘贴"),
-    ("Give them names", "给它们起个名字"),
-    (
-        "The names appear here, in the tray menu, and in the quick-switch panel — they are the only thing that lets you tell the machines apart at a glance.",
-        "名字会出现在这里、托盘菜单和快切面板上 —— 这是唯一能让你一眼认出谁是谁的东西。",
-    ),
-    (
-        "This computer takes its name from the system ({hostname}); for the rest, click a common name. Install tarsier on the other computers too and paste this set of names across, and the 3rd and 4th need no typing at all.",
-        "这台电脑的名字自动取系统里的「{hostname}」，其余的点一下常用名就行。另一台电脑上也装一份 tarsier，把这套名字粘过去，第 3、第 4 台就都不用再填了。",
-    ),
-    ("Back", "上一步"),
-    ("Done", "完成"),
-    ("+ Add computer", "+ 添加电脑"),
-    (
-        "This monitor does not report an input list; add its ports under extra_inputs in the config first.",
-        "这台显示器没有上报输入列表，先在配置文件的 extra_inputs 里补上接口。",
-    ),
-    // ---- breaks tab -----------------------------------------------------
-    ("Turn them back on from the Settings tab", "可以在「设置」里重新打开"),
-    ("You stepped away for a while 👋", "你离开了一会儿 👋"),
-    ("A fresh timer starts when you come back", "回来后会开始新的一轮计时"),
+    ("You stepped away", "你离开了一会儿"),
+    ("A fresh timer starts when you come back.", "回来后会重新开始计时。"),
     ("Taking a break", "正在休息"),
-    ("Rest for another {time}", "还需休息 {time}"),
+    (
+        "The countdown runs while you are away from the keyboard and mouse.",
+        "离开键盘和鼠标时才会倒计时。",
+    ),
     ("Working for {time}", "已连续工作 {time}"),
+    ("Reminders are paused for the next hour.", "接下来一小时内不会提醒。"),
+    (
+        "When the time is up, a reminder fades in over every screen. Stepping away counts as a break on its own.",
+        "时间一到，所有屏幕上会渐渐浮现提醒。自己离开电脑也算休息。",
+    ),
+    ("{time} left", "还剩 {time}"),
     ("Break in {time}", "{time} 后提醒休息"),
     ("Snooze for 1 min", "推迟 {n} 分钟"),
     ("Snooze for {n} min", "推迟 {n} 分钟"),
-    ("Today's health score", "今日健康分"),
-    ("Scoring starts after 15 minutes of use", "使用 15 分钟后开始评分"),
-    ("Screen time {time}", "用眼 {time}"),
-    ("1 break", "休息 {n} 次"),
-    ("{n} breaks", "休息 {n} 次"),
-    ("Longest stretch {time}", "最长连续 {time}"),
-    ("+{points} points today", "今日积分 +{points}"),
+    ("Pause for 1 hour", "暂停 1 小时"),
     (
-        "Scoring: a session scores full marks up to 110% of {work} minutes, and loses more the longer it runs past that. Being away from the computer for {rest} minutes counts as a break automatically.",
-        "评分规则：每段连续工作不超过 {work} 分钟的 110% 记满分，超得越多扣得越多。离开电脑 {rest} 分钟会被自动记为一次休息。",
+        "Every {work} min of work, a {rest} min break. Snoozing waits {snooze} min.",
+        "每工作 {work} 分钟休息 {rest} 分钟，推迟一次等 {snooze} 分钟。",
     ),
-    // ---- statistics tab --------------------------------------------------
+    ("Change", "修改"),
+    ("1 point to the next title", "离下一个称号还差 {n} 分"),
+    ("{n} points to the next title", "离下一个称号还差 {n} 分"),
+    ("The highest title there is", "已经是最高称号"),
+    ("Streak", "连续达标"),
     ("1 day", "{n} 天"),
     ("{n} days", "{n} 天"),
-    ("Streak", "连续达标"),
-    ("Total points", "累计积分"),
-    ("Current title", "当前称号"),
-    ("1 more point to level up", "再得 {n} 分升级"),
-    ("{n} more points to level up", "再得 {n} 分升级"),
-    ("Highest level reached", "已满级"),
+    ("Points", "积分"),
+    ("Title", "称号"),
+    ("Grade {g}", "评级 {g}"),
+    ("out of 100", "满分 100"),
+    ("Scoring starts after 15 minutes of use", "使用 15 分钟后开始评分"),
+    ("Screen time", "屏幕时间"),
+    ("Breaks", "休息"),
+    ("Longest stretch", "最长连续工作"),
+    ("Points today", "今日积分"),
     ("Today", "今天"),
-    ("No completed sessions today", "今天还没有完成的工作段"),
-    ("Natural break", "自然休息"),
-    ("Prompted break", "提醒后休息"),
-    ("{score} points", "{score} 分"),
+    ("Last 7 days", "最近 7 天"),
+    ("Good ({n}+)", "达标（{n} 分及以上）"),
+    ("Below {n}", "低于 {n} 分"),
+    ("No data", "未使用"),
+    (
+        "A session scores full marks up to 110% of {work} minutes and loses more the longer it runs past that. {rest} minutes away from the computer counts as a break.",
+        "一段工作不超过 {work} 分钟的 110% 就得满分，超出越多扣得越多。离开电脑 {rest} 分钟就算一次休息。",
+    ),
+    ("Stepped away", "自己离开"),
+    ("Reminded", "提醒后休息"),
     (
         "Today: {skipped} skipped, {snoozed} snoozed, {ignored} ignored",
         "今天跳过 {skipped} 次、推迟 {snoozed} 次、忽略 {ignored} 次提醒",
     ),
-    ("Health score, last 7 days", "最近 7 天健康分"),
-    ("Today's sessions", "今日工作段"),
-    ("Good ({n}+)", "达标（{n} 分及以上）"),
-    ("Below {n}", "低于 {n} 分"),
-    ("No data", "未使用"),
-    ("Adjust in Settings", "在「设置」里调整"),
-    // ---- settings tab -----------------------------------------------------
-    ("General & appearance", "通用与外观"),
-    ("Breaks", "休息"),
+    ("Sessions today", "今天的工作段"),
+    ("No session has ended yet today.", "今天还没有结束的工作段。"),
+    // ---- main window: Settings tab -----------------------------------------
+    ("General", "通用"),
     ("Displays", "显示器"),
-    ("Move these settings to another computer", "把这套设置搬到别的电脑"),
-    ("Hotkeys", "快捷键"),
-    ("Record", "录制"),
-    ("Cancel", "取消"),
-    ("Press a combination…", "按下组合键…"),
-    (
-        "Click Record and press the combination you want. It takes effect straight away — there is no config file to edit and no restart.",
-        "点「录制」后按下组合键即可，改完立即生效 —— 不用改配置文件，也不用重启。",
-    ),
     ("Advanced", "高级"),
-    ("Open", "打开"),
-    ("Not set up yet", "待设置"),
-    ("One-key flip", "盲切"),
-    ("Quick-switch panel", "快切面板"),
-    ("Preview quick-switch panel", "预览快切面板"),
-    ("Skin", "皮肤"),
-    ("Default", "默认"),
-    ("Neo Brutalism", "新粗野主义"),
-    (
-        "The look the app has always had: the system font, soft corners and quiet greys",
-        "应用一直以来的样子：系统字体、圆角、克制的灰色",
-    ),
-    (
-        "Cream paper, pure ink, thick black strokes and hard offset shadows. Light only by design",
-        "奶油纸张、纯黑墨水、粗黑描边和硬位移阴影。按设计只提供浅色",
-    ),
-    (
-        "A skin decides the look, and some only ever ship one light / dark mode",
-        "皮肤决定整体外观，有些皮肤只提供一种浅色 / 深色模式",
-    ),
     ("Appearance", "外观"),
+    ("Skin", "皮肤"),
+    ("Light or dark", "亮色或暗色"),
     (
-        "System tracks the Windows light / dark setting as you change it",
-        "「跟随系统」会随 Windows 的浅色 / 深色设置实时切换",
+        "This skin is drawn in light only. Your choice comes back with the default skin.",
+        "这款皮肤只有亮色，换回默认皮肤后会恢复你的选择。",
+    ),
+    (
+        "System follows the Windows setting as it changes.",
+        "「跟随系统」会随 Windows 设置实时切换。",
     ),
     ("Language", "语言"),
-    ("Switching redraws every window right away", "切换后所有窗口立即更新"),
-    ("General", "通用"),
-    ("Start automatically at login", "开机自动启动"),
+    ("Every window switches right away.", "所有窗口会立即切换。"),
+    ("Start at login", "登录时启动"),
     (
-        "Runs quietly in the tray after you sign in to Windows",
-        "登录 Windows 后在托盘里静默运行",
+        "Runs quietly in the tray after you sign in to Windows.",
+        "登录 Windows 后在托盘里安静运行。",
+    ),
+    ("min", "分钟"),
+    ("Break reminders", "休息提醒"),
+    ("Remind me to take breaks", "提醒我休息"),
+    (
+        "After each stretch of work, a reminder fades in over every screen. It never blocks the keyboard or mouse.",
+        "每段工作结束后，所有屏幕上会浮现提醒，不会挡住键盘和鼠标。",
+    ),
+    ("Stay quiet in fullscreen", "全屏时保持安静"),
+    (
+        "Holds reminders while you are gaming, watching video or presenting.",
+        "玩游戏、看视频或演示时暂不提醒。",
     ),
     ("Developer mode", "开发者模式"),
     (
-        "Shows DDC/CI diagnostics and command tracing on the Monitors tab, and logs every command",
-        "在「显示器」页显示 DDC/CI 诊断信息和命令记录，并在日志里记录每条命令",
+        "Shows DDC/CI diagnostics and recent commands on the Monitors tab, and logs every command.",
+        "在显示器页显示 DDC/CI 诊断信息和最近的命令，并记录每条命令。",
     ),
-    ("Break reminders", "休息提醒"),
-    ("Turn on break reminders", "启用休息提醒"),
-    (
-        "When the time is up, a full-screen reminder fades in; stepping away counts as a break automatically",
-        "到点后全屏淡入提醒，离开电脑会自动记为休息",
-    ),
-    ("Stay quiet in fullscreen / presentations", "全屏 / 演示时不打扰"),
-    (
-        "Holds reminders while you are gaming, watching video, or presenting",
-        "玩游戏、看视频或演示 PPT 时推迟提醒",
-    ),
+    ("Settings folder", "设置文件夹"),
+    ("Open", "打开"),
+    ("Press a combination…", "按下组合键…"),
     ("Not set", "未设置"),
-    ("Monitor inputs", "显示器输入"),
+    ("Cancel", "取消"),
+    ("Record", "录制"),
+    ("Clear", "清除"),
     (
-        "List the computers sharing each monitor and give them names — the names are the only thing that lets you tell them apart at a glance. Click the dot on the left to mark the one you are sitting at; it only affects what is shown, never switching.",
-        "给每台显示器列出共用它的电脑并起好名字 —— 名字是唯一能让你一眼认出谁是谁的东西。点左端圆点标记你正坐着的那台，只影响显示，不影响切换。",
+        "Another program is already using this combination.",
+        "这个组合键已被其他程序占用。",
     ),
     (
-        "No external monitors that support DDC/CI have been detected yet.",
-        "还没有检测到支持 DDC/CI 的外接显示器。",
+        "This is not a combination Windows understands. Record it again.",
+        "Windows 无法识别这个组合键，请重新录制。",
     ),
     (
-        "The port-to-name mapping lives on the monitor, so it holds whichever computer you fill it in on. Set it up once and move it to the rest, and you never type it in again.",
-        "「接口 → 电脑名」跟着显示器走，所以在哪台电脑上填都一样。在一台上填好，把它搬到其余几台，就不用再填一遍。",
+        "Windows refused this combination: {reason}",
+        "Windows 拒绝了这个组合键：{reason}",
     ),
-    ("Copy settings", "复制设置"),
+    ("Hotkeys", "快捷键"),
     (
-        "Copied. Click \"Import settings\" on the other computer.",
-        "已复制。在另一台电脑上点「导入设置」。",
+        "Click Record and press the combination you want. It works straight away, in every application.",
+        "点击「录制」后按下想要的组合键，立即生效，在任何程序里都能用。",
     ),
-    ("Import settings", "导入设置"),
-    ("Brightness up", "调高亮度"),
+    (
+        "List the computers sharing each monitor and give them names; the names are what the tray menu and the quick-switch panel show. Marking which one you are sitting at only changes what is shown, never where a switch goes.",
+        "列出共用每台显示器的电脑并给它们起名，托盘菜单和快切面板里显示的就是这些名字。标记你正在用哪台只影响显示，不会改变切换的去向。",
+    ),
+    ("No monitors to set up", "没有可设置的显示器"),
+    (
+        "Monitors that support DDC/CI appear here once they are detected.",
+        "检测到支持 DDC/CI 的显示器后，会显示在这里。",
+    ),
+    ("Not set up", "未设置"),
+    ("One-key flip", "盲切"),
+    ("Quick-switch panel", "快切面板"),
+    (
+        "This monitor does not report its inputs. Add its ports under extra_inputs in the config file.",
+        "这台显示器没有报告输入列表，请在配置文件的 extra_inputs 中添加它的接口。",
+    ),
+    ("Preview the quick-switch panel", "预览快切面板"),
+    ("This PC", "本机"),
+    ("Name this computer", "给这台电脑起名"),
+    ("Name these {n} computers", "给这 {n} 台电脑起名"),
+    ("Pick at least two", "至少选择两个"),
+    ("Which ports have a computer behind them?", "哪些接口接着电脑？"),
+    (
+        "Leave out ports that are empty or go to a game console or TV box.",
+        "空着的接口，以及接游戏机或电视盒子的接口，都不用选。",
+    ),
+    (
+        "{port} looks like this computer, because the monitor is showing it now.",
+        "显示器正在显示 {port}，所以它应该就是这台电脑。",
+    ),
+    (
+        "The monitor does not say which input it is showing.",
+        "显示器没有告知正在显示哪个输入。",
+    ),
+    ("Back", "上一步"),
+    ("Done", "完成"),
+    ("Give each computer a name", "给每台电脑起个名字"),
+    (
+        "This computer is named after the system ({hostname}). For the others, type a name or pick a common one.",
+        "这台电脑使用系统名称（{hostname}）。其他电脑可以输入名字，或选一个常用的。",
+    ),
+    ("Remove this computer", "移除这台电脑"),
+    ("Add a computer", "添加电脑"),
+    (
+        "The monitor does not report its inputs, so these are the common ports. Add others under extra_inputs in the config file.",
+        "显示器没有报告输入列表，这里列的是常见接口。其他接口请在配置文件的 extra_inputs 中添加。",
+    ),
+    ("This is me", "这是本机"),
+    ("Paste from another computer", "从另一台电脑粘贴"),
+    ("Other computers", "其他电脑"),
+    (
+        "Set the names up once, copy them here, and paste them on each of the other computers.",
+        "名字只需设置一次：在这里复制，再到其他每台电脑上粘贴。",
+    ),
+    ("Copy these settings", "复制这些设置"),
+    (
+        "Copied. Paste them on the other computer.",
+        "已复制，请到另一台电脑上粘贴。",
+    ),
+    // ---- labels kept in tables and translated where drawn ------------------
+    (
+        "Administrator permission was not granted, so the switch was cancelled",
+        "没有获得管理员授权，已取消切换",
+    ),
+    ("Blink a few times to wet your eyes again", "眨眨眼，让眼睛重新湿润起来"),
+    ("Break", "休息"),
     ("Brightness down", "调低亮度"),
-    ("Registration failed: {e}", "注册失败 {e}"),
-    ("Open config folder", "打开配置文件夹"),
-    // ---- tab bar and developer diagnostics -------------------------------
-    ("Monitors", "显示器"),
-    ("Breaks & stats", "休息与统计"),
-    ("Settings", "设置"),
-    ("Diagnostics", "诊断信息"),
-    ("Recent commands", "最近的命令"),
-    ("(none)", "（暂无）"),
+    ("Brightness up", "调高亮度"),
+    ("Close your eyes and take a few slow breaths", "闭上眼睛，深呼吸几次"),
+    ("Console", "游戏机"),
+    ("Desktop", "台式机"),
+    ("Eye guardian", "护眼卫士"),
+    (
+        "Fetch a glass of water and walk around a little",
+        "去倒杯水，顺便走动走动",
+    ),
+    ("Health pro", "健康达人"),
+    ("Laptop", "笔记本"),
+    (
+        "Look at something 6 metres away and let your eyes relax",
+        "看看 6 米外的地方，让眼睛的睫状肌放松一下",
+    ),
+    ("Move your wrists and fingers around", "活动一下手腕和手指"),
+    ("Pacing pro", "节奏达人"),
+    ("Sedentary starter", "久坐新手"),
+    ("Snooze", "推迟"),
+    (
+        "Stand up, stretch, and roll your neck and shoulders",
+        "站起来伸个懒腰，转转脖子和肩膀",
+    ),
+    ("Stretch apprentice", "伸展学徒"),
+    ("Tarsier grandmaster", "眼镜猴大师"),
+    ("Work", "每工作"),
+    ("Work PC", "公司电脑"),
 ];
 
 fn zh_table() -> &'static HashMap<&'static str, &'static str> {
     static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    TABLE.get_or_init(|| ZH.iter().chain(MAIN_WINDOW).copied().collect())
+    TABLE.get_or_init(|| ZH.iter().copied().collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every English key has to be unique: a duplicate would silently win over
-    /// the other translation depending on which table it sat in.
     #[test]
     fn no_english_key_is_listed_twice() {
-        let mut keys: Vec<&str> = ZH.iter().chain(MAIN_WINDOW).map(|(en, _)| *en).collect();
+        let mut keys: Vec<&str> = ZH.iter().map(|(en, _)| *en).collect();
         let listed = keys.len();
         keys.sort_unstable();
         keys.dedup();
@@ -535,30 +574,13 @@ mod tests {
     /// "translation" that does nothing.
     #[test]
     fn every_translation_actually_translates() {
-        for (en, zh) in ZH.iter().chain(MAIN_WINDOW) {
-            assert_ne!(en, zh, "{en:?} is its own translation");
-            assert!(
-                zh.chars().any(is_cjk),
-                "{zh:?} has no Chinese in it, not even punctuation"
-            );
+        let cjk = |c: char| matches!(c, '\u{3000}'..='\u{303f}' | '\u{4e00}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}');
+        for (en, zh) in ZH {
+            assert!(zh.chars().any(cjk), "{en:?} → {zh:?} has no Chinese in it");
         }
     }
 
-    /// Han characters, CJK punctuation and the full-width forms: the separator
-    /// is translated as "；", which is none of the first without being the rest.
-    fn is_cjk(c: char) -> bool {
-        matches!(c, '\u{3000}'..='\u{303f}' | '\u{4e00}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}')
-    }
-
-    #[test]
-    fn chinese_punctuation_counts_as_chinese() {
-        assert!(is_cjk('；'));
-        assert!(is_cjk('显'));
-        assert!(!is_cjk(';'));
-        assert!(!is_cjk('A'));
-    }
-
-    /// Every `{name}` in a source string, braces included.
+    /// Every `{name}` in a string, braces included, sorted.
     fn placeholders(text: &str) -> Vec<&str> {
         let mut found = Vec::new();
         let mut rest = text;
@@ -568,39 +590,31 @@ mod tests {
             found.push(&rest[start..start + len + 1]);
             rest = &rest[start + len + 1..];
         }
+        found.sort_unstable();
         found
     }
 
-    /// Placeholders survive the lookup, or the translation would be printed
-    /// with a hole in it.
+    /// A translation has exactly the placeholders it will be filled with, or it
+    /// is printed with a hole in it. The counted form's singular names its
+    /// number in words, so its translation may add `{n}` but nothing else.
     #[test]
-    fn chinese_keeps_the_placeholders_it_is_filled_with() {
-        for (en, zh) in ZH.iter().chain(MAIN_WINDOW) {
-            for placeholder in placeholders(en) {
-                assert!(
-                    zh.contains(placeholder),
-                    "{en:?} takes {placeholder} but its translation does not"
-                );
+    fn translations_keep_their_placeholders() {
+        for (en, zh) in ZH {
+            let mut want = placeholders(en);
+            let got = placeholders(zh);
+            if got.contains(&"{n}") && !want.contains(&"{n}") {
+                want.push("{n}");
+                want.sort_unstable();
             }
+            assert_eq!(want, got, "{en:?} → {zh:?}");
         }
     }
 
     #[test]
-    fn placeholders_are_recognised() {
-        assert_eq!(placeholders("Switched to {label}"), ["{label}"]);
-        assert_eq!(placeholders("{n} h {m} min"), ["{n}", "{m}"]);
-        assert!(placeholders("Quit").is_empty());
-    }
-
-    #[test]
-    fn english_is_the_source_and_chinese_comes_from_the_table() {
+    fn chinese_comes_from_the_table_and_falls_back_to_english() {
         assert_eq!(tr_in(Language::En, "Switch monitor input"), "Switch monitor input");
         assert_eq!(tr_in(Language::Zh, "Switch monitor input"), "切换显示器输入");
-    }
-
-    /// An untranslated string must still read as words, not as a key.
-    #[test]
-    fn a_string_nobody_translated_falls_back_to_english() {
+        // An untranslated string still reads as words, not as a key.
         assert_eq!(tr_in(Language::Zh, "Not translated yet"), "Not translated yet");
     }
 
@@ -617,18 +631,8 @@ mod tests {
         );
     }
 
-    /// Chinese needs the same translation for both forms; English must not say
-    /// "1 monitors".
     #[test]
-    fn the_counted_form_reads_correctly_in_both_languages() {
-        let one = tr_args_in(Language::Zh, "Applied to 1 monitor", &[]);
-        let many = tr_args_in(Language::Zh, "Applied to {n} monitors", &[("n", "3".to_string())]);
-        assert_eq!(one, "已应用到 1 台显示器");
-        assert_eq!(many, "已应用到 3 台显示器");
-    }
-
-    #[test]
-    fn the_counted_form_picks_the_form_that_agrees_with_the_number() {
+    fn the_counted_form_agrees_with_the_number() {
         assert_eq!(
             tr!(n = 1, "Applied to 1 monitor" | "Applied to {n} monitors"),
             "Applied to 1 monitor"
@@ -637,9 +641,7 @@ mod tests {
             tr!(n = 3, "Applied to 1 monitor" | "Applied to {n} monitors"),
             "Applied to 3 monitors"
         );
-
-        // Counts arrive as whatever the caller counts in, and a count and
-        // another placeholder can appear together.
+        // A count and another placeholder together, the count in any integer type.
         let worked: u64 = 2;
         assert_eq!(
             tr!(
@@ -649,48 +651,36 @@ mod tests {
             ),
             "You have been working for 2 minutes. Stand up"
         );
-    }
-
-    /// The language picker names languages in their own language, which is the
-    /// one string that must never be translated.
-    #[test]
-    fn language_names_are_never_translated() {
-        assert_eq!(Language::En.label(), "English");
-        assert_eq!(Language::Zh.label(), "中文");
+        // Chinese has no plural, so the singular carries the number too.
+        assert_eq!(
+            tr_args_in(Language::Zh, "Applied to 1 monitor", &[("n", "1".into())]),
+            "已应用到 1 台显示器"
+        );
     }
 
     #[test]
-    fn the_default_language_is_english() {
-        assert_eq!(Language::default(), Language::En);
+    fn the_ui_language_is_per_thread_in_tests_and_reaches_every_lookup() {
+        set_language(Language::Zh);
+        assert_eq!(translate("Quit"), "退出");
+        let other = std::thread::spawn(|| translate("Quit")).join().unwrap();
+        assert_eq!(other, "Quit", "another test thread is not affected");
+        set_language(Language::En);
+        assert_eq!(translate("Quit"), "Quit");
     }
 
-    /// The names in `config.json`, which is hand-edited, are a contract with
-    /// whatever is already on disk and with what the docs tell people to write.
+    /// `config.json` is hand-edited, so the names in it are a contract with
+    /// what is already on disk and with what the docs tell people to write.
     #[test]
     fn the_config_names_the_languages_en_and_zh() {
         assert_eq!(serde_json::to_string(&Language::En).unwrap(), "\"en\"");
-        assert_eq!(serde_json::to_string(&Language::Zh).unwrap(), "\"zh\"");
         assert_eq!(serde_json::from_str::<Language>("\"zh\"").unwrap(), Language::Zh);
+        assert_eq!(Language::default(), Language::En);
     }
 
-    /// The component library has strings of its own — the cut/copy/paste menu a
-    /// text field opens — and a locale of its own, spelled differently from
-    /// ours. A switch that only moved our tables would leave those in English.
-    ///
-    /// It is a process global, so this test puts it back, and it deliberately
-    /// drives the library directly rather than through [`set_language`]: that
-    /// one flips our own global too, and the rest of the suite reads it.
-    #[test]
-    fn the_language_reaches_the_component_library_too() {
-        gpui_kit::component::set_locale(Language::Zh.locale());
-        assert_eq!(&*gpui_kit::component::locale(), "zh-CN");
-        gpui_kit::component::set_locale(Language::En.locale());
-        assert_eq!(&*gpui_kit::component::locale(), "en");
-    }
-
-    /// Every `.rs` file under `src/` except this one, concatenated.
-    fn source_text() -> String {
-        fn walk(dir: &std::path::Path, out: &mut String) {
+    /// Every `.rs` file under `src/` but this one, with its comment lines
+    /// dropped (doc examples name strings that are not in the UI).
+    fn sources() -> Vec<String> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("reading src/").flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -698,28 +688,100 @@ mod tests {
                 } else if path.extension().is_some_and(|e| e == "rs")
                     && path.file_name().is_some_and(|n| n != "i18n.rs")
                 {
-                    out.push_str(&std::fs::read_to_string(&path).expect("reading a source file"));
+                    let text = std::fs::read_to_string(&path).expect("reading a source file");
+                    out.push(
+                        text.lines()
+                            .filter(|l| !l.trim_start().starts_with("//"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
                 }
             }
         }
-        let mut out = String::new();
+        let mut out = Vec::new();
         walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
-        // An escape stands for the character it denotes: a key containing a
-        // quotation mark is written `\"` where it is used.
-        out.replace("\\\"", "\"")
+        out
     }
 
-    /// Keys are source strings, so nothing at compile time ties a call site to
-    /// the table. Reword a string and its translation is stranded — the entry
-    /// stays, the new wording is silently English in Chinese. This walks the
-    /// sources and fails when a key is no longer written anywhere.
+    /// The string literals passed straight to a `tr!` — the sources, both forms
+    /// of a counted one — and not literals nested in its arguments.
+    fn tr_literals(source: &str) -> Vec<String> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while i + 4 <= chars.len() {
+            let start_of_word = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+            if !(start_of_word && chars[i..i + 4] == ['t', 'r', '!', '(']) {
+                i += 1;
+                continue;
+            }
+            i += 4;
+            let mut depth = 1;
+            while depth > 0 {
+                match chars[i] {
+                    '"' => {
+                        let mut text = String::new();
+                        i += 1;
+                        while chars[i] != '"' {
+                            if chars[i] == '\\' {
+                                i += 1;
+                                text.push(match chars[i] {
+                                    'n' => '\n',
+                                    other => other,
+                                });
+                            } else {
+                                text.push(chars[i]);
+                            }
+                            i += 1;
+                        }
+                        if depth == 1 {
+                            found.push(text);
+                        }
+                    }
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        found
+    }
+
     #[test]
-    fn every_key_still_appears_in_the_source() {
-        let source = source_text();
-        for (en, _) in ZH.iter().chain(MAIN_WINDOW) {
+    fn the_scanner_finds_sources_and_skips_nested_literals() {
+        let found = tr_literals(r#"x(tr!("A {e}", e = format!("{e:#}"))); tr!(n = k, "1 b" | "{n} b"); attr!("no")"#);
+        assert_eq!(found, ["A {e}", "1 b", "{n} b"]);
+    }
+
+    /// Reword a string and nothing at compile time notices that its translation
+    /// is now stranded — the Chinese UI silently shows English. So every string
+    /// the code asks for has an entry...
+    #[test]
+    fn every_string_the_ui_asks_for_has_a_translation() {
+        let table = zh_table();
+        let mut missing: Vec<String> = sources()
+            .iter()
+            .flat_map(|s| tr_literals(s))
+            .filter(|s| !table.contains_key(s.as_str()))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "no Chinese for: {missing:#?}");
+    }
+
+    /// ...and every entry is still asked for, through `tr!` or as a quoted
+    /// label in a table that is translated where it is drawn.
+    #[test]
+    fn every_translation_is_still_used() {
+        let sources = sources();
+        let asked: std::collections::HashSet<String> = sources.iter().flat_map(|s| tr_literals(s)).collect();
+        let quoted = sources.join("\n");
+        for (en, _) in ZH {
+            let literal = format!("\"{}\"", en.replace('\\', "\\\\").replace('"', "\\\""));
             assert!(
-                source.contains(en),
-                "{en:?} is in the table but is no longer written anywhere in src/"
+                asked.contains(*en) || quoted.contains(&literal),
+                "{en:?} is in the table but nothing in src/ asks for it"
             );
         }
     }

@@ -25,16 +25,23 @@ use crate::platform::Instance;
 use crate::tray::{Command, HotkeyRegistry, Tray};
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(at) = args.iter().position(|a| a == config::HOME_ARG)
+        && let Some(home) = args.get(at + 1)
+    {
+        // SAFETY: nothing else is running yet; every later read of the data
+        // directory goes through this one variable.
+        unsafe { std::env::set_var(config::HOME_VAR, home) };
+    }
     // The elevated helper does one DDC/CI write and exits; it must not
     // touch the single-instance lock or open any window.
-    let args: Vec<String> = std::env::args().collect();
     if let Some(at) = args.iter().position(|a| a == display::elevate::HELPER_ARG) {
         logger::init();
         std::process::exit(display::run_helper(&args[at + 1..]));
     }
 
     let (activate_tx, activate_rx) = mpsc::channel();
-    let _instance = match platform::claim_single_instance(activate_tx) {
+    let _instance = match platform::claim_single_instance(&config::instance_scope(), activate_tx) {
         Instance::Primary(instance) => instance,
         Instance::Secondary => return,
     };
@@ -105,7 +112,7 @@ fn main() {
                         run_command(&controller, command, cx);
                     }
                     ticks += 1;
-                    if ticks % 10 == 0
+                    if ticks.is_multiple_of(10)
                         && let Some(tray) = &tray
                     {
                         // One derived snapshot drives the whole menu: the label

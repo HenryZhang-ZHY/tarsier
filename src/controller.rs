@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +39,18 @@ impl MonitorEntry {
     pub fn inputs_reported(&self) -> bool {
         !self.dev.input_sources().is_empty()
     }
+
+    /// A monitor at half brightness and contrast, on its first input.
+    #[cfg(test)]
+    pub fn fake(id: &str, name: &str, inputs: &[u8]) -> Self {
+        let half = Feature { current: 50, max: 100 };
+        MonitorEntry {
+            dev: Arc::new(display::Monitor::fake(id, name, inputs)),
+            brightness: Some(half),
+            contrast: Some(half),
+            current_input: inputs.first().copied(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -56,7 +69,7 @@ pub struct Controller {
     pub autostart: bool,
     /// Last user-facing message (errors, hotkey results).
     pub notice: Option<SharedString>,
-    pub hotkey_errors: Vec<String>,
+    pub hotkey_errors: Vec<tray::HotkeyError>,
     /// The process's registered global hotkeys, when a manager could be made.
     /// Owned here so the Settings tab can re-register in place; the manager
     /// itself lives in `main`, on the thread that created its hidden window.
@@ -69,13 +82,22 @@ pub struct Controller {
     overlays: Vec<(WindowHandle<BreakOverlay>, Entity<BreakOverlay>)>,
     /// One quick-switch panel per display while it is open.
     switch_huds: Vec<WindowHandle<SwitchHud>>,
+    /// Set from the request until the panels exist: they are built in a
+    /// deferred callback, and a second press before then must not build more.
+    switch_hud_opening: bool,
+    /// Bumped on every open, so a timeout only closes the panel it was set for.
+    switch_hud_generation: u64,
     /// The window that had focus before the panel took it, to hand it back.
     switch_hud_return_to: Option<isize>,
     last_tick: Instant,
     last_save: Instant,
     stats_dirty: bool,
     pub main_window: Option<AnyWindowHandle>,
+    storage: Storage,
 }
+
+/// How long a notice stays at the foot of the main window.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(8);
 
 struct GlobalController(Entity<Controller>);
 impl Global for GlobalController {}
@@ -106,37 +128,44 @@ pub fn local_date(ts: i64) -> NaiveDate {
         .unwrap_or_default()
 }
 
+/// Where the controller keeps what it owns between runs.
+#[derive(Clone)]
+pub enum Storage {
+    Disk {
+        config: PathBuf,
+        stats: PathBuf,
+    },
+    /// Nothing is written. Tests use this, so they can never touch the user's
+    /// real settings.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Memory,
+}
+
+impl Storage {
+    /// The files in [`config::data_dir`].
+    pub fn default_disk() -> Self {
+        Self::Disk {
+            config: config::config_path(),
+            stats: config::stats_path(),
+        }
+    }
+}
+
 impl Controller {
+    /// The running app's controller: loads the saved state, starts the first
+    /// monitor scan and the break ticker, and registers the global handle the
+    /// popup windows look it up through.
     pub fn init(cx: &mut App) -> Entity<Controller> {
-        let mut config: Config = config::load(&config::config_path());
+        let storage = Storage::default_disk();
+        let (mut config, stats): (Config, Stats) = match &storage {
+            Storage::Disk { config: c, stats: s } => (config::load(c), config::load(s)),
+            Storage::Memory => Default::default(),
+        };
         config.migrate();
-        let stats: Stats = config::load(&config::stats_path());
-        let tracker = BreakTracker::new(config.breaks.settings(), now_ts());
         crate::logger::set_verbose(config.developer_mode);
-        // Before any window is built: every label is looked up as it is drawn.
-        i18n::set_language(config.language);
+        let autostart = platform::autostart_enabled();
         let entity = cx.new(|cx| {
-            let mut this = Controller {
-                config,
-                monitors: Vec::new(),
-                scanning: false,
-                tracker,
-                stats,
-                paused_until: None,
-                autostart: platform::autostart_enabled(),
-                notice: None,
-                hotkey_errors: Vec::new(),
-                hotkeys: None,
-                hotkey_hold: false,
-                writes: HashMap::new(),
-                overlays: Vec::new(),
-                switch_huds: Vec::new(),
-                switch_hud_return_to: None,
-                last_tick: Instant::now(),
-                last_save: Instant::now(),
-                stats_dirty: false,
-                main_window: None,
-            };
+            let mut this = Controller::new(config, stats, storage, autostart);
             this.refresh_monitors(cx);
             this.start_ticker(cx);
             // Runs on tray "Quit" and on Windows logoff/shutdown.
@@ -145,6 +174,51 @@ impl Controller {
                 async {}
             })
             .detach();
+            this
+        });
+        cx.set_global(GlobalController(entity.clone()));
+        entity
+    }
+
+    /// A controller over the given state, with no side effects: nothing is
+    /// scanned, nothing ticks, and nothing is read from disk.
+    pub fn new(config: Config, stats: Stats, storage: Storage, autostart: bool) -> Self {
+        // Before any window is built: every label is looked up as it is drawn.
+        i18n::set_language(config.language);
+        let tracker = BreakTracker::new(config.breaks.settings(), now_ts());
+        Controller {
+            config,
+            monitors: Vec::new(),
+            scanning: false,
+            tracker,
+            stats,
+            paused_until: None,
+            autostart,
+            notice: None,
+            hotkey_errors: Vec::new(),
+            hotkeys: None,
+            hotkey_hold: false,
+            writes: HashMap::new(),
+            overlays: Vec::new(),
+            switch_huds: Vec::new(),
+            switch_hud_opening: false,
+            switch_hud_generation: 0,
+            switch_hud_return_to: None,
+            last_tick: Instant::now(),
+            last_save: Instant::now(),
+            stats_dirty: false,
+            main_window: None,
+            storage,
+        }
+    }
+
+    /// A controller over in-memory state and the given monitors, registered as
+    /// the global one, for UI tests.
+    #[cfg(test)]
+    pub fn for_test(config: Config, monitors: Vec<MonitorEntry>, cx: &mut App) -> Entity<Controller> {
+        let entity = cx.new(|_| {
+            let mut this = Controller::new(config, Stats::default(), Storage::Memory, false);
+            this.monitors = monitors;
             this
         });
         cx.set_global(GlobalController(entity.clone()));
@@ -368,19 +442,20 @@ impl Controller {
         cx.notify();
         cx.spawn(async move |this, cx| {
             loop {
-                let dev = dev.clone();
+                let writer = dev.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move { dev.set(code, value) })
+                    .spawn(async move { writer.set(code, value) })
                     .await;
+                let failed = result.is_err();
                 let next = this
                     .update(cx, |this, cx| {
                         if let Err(e) = result {
-                            this.notice = Some(format!("{}: {e}", dev_name(&this.monitors, &key.0)).into());
-                            cx.notify();
+                            let name = dev_name(&this.monitors, &key.0);
+                            this.show_notice(format!("{name}: {e:#}"), cx);
                         }
                         let slot = this.writes.get_mut(&key)?;
-                        if slot.desired == value {
+                        if slot.desired == value || failed {
                             slot.inflight = false;
                             None
                         } else {
@@ -391,11 +466,34 @@ impl Controller {
                     .flatten();
                 match next {
                     Some(v) => value = v,
-                    None => break,
+                    None => {
+                        // The slider already shows the value that was refused.
+                        // Read back what the monitor holds, so the UI stops
+                        // claiming otherwise and the same value can be retried.
+                        if failed {
+                            let dev = dev.clone();
+                            let actual = cx.background_executor().spawn(async move { dev.get(code).ok() }).await;
+                            this.update(cx, |this, cx| this.store_feature(&key.0, code, actual, cx))
+                                .ok();
+                        }
+                        break;
+                    }
                 }
             }
         })
         .detach();
+    }
+
+    fn store_feature(&mut self, monitor_id: &str, code: u8, value: Option<Feature>, cx: &mut Context<Self>) {
+        let Some(entry) = self.monitors.iter_mut().find(|m| m.id() == monitor_id) else {
+            return;
+        };
+        match code {
+            VCP_BRIGHTNESS => entry.brightness = value.or(entry.brightness),
+            VCP_CONTRAST => entry.contrast = value.or(entry.contrast),
+            _ => return,
+        }
+        cx.notify();
     }
 
     /// Change brightness on every monitor by `step_percent` of its range.
@@ -429,23 +527,23 @@ impl Controller {
             return;
         };
         let dev = entry.dev.clone();
-        entry.current_input = Some(code);
+        let before = entry.current_input.replace(code);
         cx.notify();
         let label = self.input_label(monitor_id, code);
+        let id = monitor_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move { dev.switch_input(code) })
                 .await;
-            this.update(cx, |this, cx| {
-                this.notice = Some(
-                    match result {
-                        Ok(()) => tr!("Switched to {label}", label = label),
-                        Err(e) => tr!("Switching input failed: {e}", e = e),
+            this.update(cx, |this, cx| match result {
+                Ok(()) => this.show_notice(tr!("Switched to {label}", label = label), cx),
+                Err(e) => {
+                    if let Some(entry) = this.monitors.iter_mut().find(|m| m.id() == id) {
+                        entry.current_input = before;
                     }
-                    .into(),
-                );
-                cx.notify();
+                    this.show_notice(tr!("Switching input failed: {e}", e = format!("{e:#}")), cx);
+                }
             })
             .ok();
         })
@@ -473,9 +571,10 @@ impl Controller {
             })
             .collect();
         if jobs.is_empty() {
-            self.notice =
-                Some(tr!("No computers are set up to switch between yet — add them on the Settings tab").into());
-            cx.notify();
+            self.show_notice(
+                tr!("No computers are set up to switch between yet. Add them in Settings → Displays."),
+                cx,
+            );
             self.show_main_window(cx);
             return;
         }
@@ -499,11 +598,9 @@ impl Controller {
                 .collect::<Option<Vec<u8>>>();
             let Some(targets) = targets else {
                 this.update(cx, |this, cx| {
-                    this.notice = Some(
-                        tr!(
-                            "Cannot read which input the monitor is on, so there is no direction to flip in — pick one in the quick-switch panel"
-                        )
-                        .into(),
+                    this.show_notice(
+                        tr!("The monitor will not say which input it is on, so pick one in the quick-switch panel."),
+                        cx,
                     );
                     this.open_switch_hud(cx);
                 })
@@ -534,11 +631,10 @@ impl Controller {
                             }
                             msgs.push(tr!("Switched to {label}", label = this.input_label(&id, target)));
                         }
-                        Err(e) => msgs.push(tr!("Switch failed: {e}", e = e)),
+                        Err(e) => msgs.push(tr!("Switching input failed: {e}", e = format!("{e:#}"))),
                     }
                 }
-                this.notice = Some(msgs.join(tr!("; ")).into());
-                cx.notify();
+                this.show_notice(msgs.join(tr!("; ")), cx);
             })
             .ok();
         })
@@ -569,7 +665,10 @@ impl Controller {
         if dt == 0 {
             return;
         }
-        self.last_tick = Instant::now();
+        // Advance by the seconds counted rather than resetting to now: timers
+        // that fire a little late would otherwise lose that fraction every
+        // tick, and a 50-minute reminder would arrive most of a minute late.
+        self.last_tick += Duration::from_secs(dt);
         if self.paused_until.is_some_and(|t| t <= now) {
             self.paused_until = None;
         }
@@ -702,7 +801,7 @@ impl Controller {
     /// Fade the overlays out, then remove them. Deferred, because the request
     /// may come from code that is updating an overlay window.
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
-        let overlays: Vec<_> = self.overlays.drain(..).collect();
+        let overlays = std::mem::take(&mut self.overlays);
         if overlays.is_empty() {
             return;
         }
@@ -839,24 +938,36 @@ impl Controller {
 
     pub fn set_autostart(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if let Err(e) = platform::set_autostart(enabled) {
-            self.notice = Some(tr!("Could not change the autostart setting: {e}", e = e).into());
+            self.show_notice(
+                tr!("Could not change the autostart setting: {e}", e = format!("{e:#}")),
+                cx,
+            );
         }
         self.autostart = platform::autostart_enabled();
         cx.notify();
     }
 
     fn save_config(&mut self) {
-        if let Err(e) = config::save(&config::config_path(), &self.config) {
-            self.notice = Some(tr!("Could not save settings: {e}", e = e).into());
+        let Storage::Disk { config: path, .. } = &self.storage else {
+            return;
+        };
+        if let Err(e) = config::save(path, &self.config) {
+            // No timer: a settings file that cannot be written stays a problem
+            // until something changes, so the notice stays too.
+            self.notice = Some(tr!("Could not save settings: {e}", e = format!("{e:#}")).into());
         }
     }
 
     pub fn save_stats(&mut self) {
-        match config::save(&config::stats_path(), &self.stats) {
-            Ok(()) => self.stats_dirty = false,
-            Err(e) => log::error!("saving stats: {e}"),
-        }
         self.last_save = Instant::now();
+        let Storage::Disk { stats: path, .. } = &self.storage else {
+            self.stats_dirty = false;
+            return;
+        };
+        match config::save(path, &self.stats) {
+            Ok(()) => self.stats_dirty = false,
+            Err(e) => log::error!("saving stats: {e:#}"),
+        }
     }
 
     /// Persist everything before exit, closing the running session.
@@ -868,13 +979,39 @@ impl Controller {
         self.save_stats();
     }
 
+    /// The name each connected monitor travels under in an export: its model
+    /// name, numbered when two identical monitors would otherwise collide. Both
+    /// ends number in enumeration order, which is stable for a fixed set of
+    /// cables.
+    fn transfer_names(&self) -> Vec<String> {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        self.monitors
+            .iter()
+            .map(|m| {
+                let n = seen.entry(m.dev.name.as_str()).or_default();
+                *n += 1;
+                if *n == 1 {
+                    m.dev.name.clone()
+                } else {
+                    format!("{} ({n})", m.dev.name)
+                }
+            })
+            .collect()
+    }
+
     /// Everything about input switching that another computer can use, as text
-    /// for the clipboard. See [`config::SwitchingExport`].
+    /// for the clipboard. See [`config::SwitchingExport`]. Monitors that have not
+    /// been set up are left out, so they cannot overwrite one that has been on
+    /// the receiving machine.
     pub fn export_switching(&self) -> String {
         let monitors = self
             .monitors
             .iter()
-            .map(|m| (m.dev.name.clone(), self.monitor_prefs(m.id()).portable()))
+            .zip(self.transfer_names())
+            .filter_map(|(m, name)| {
+                let prefs = self.monitor_prefs(m.id());
+                (!prefs.endpoints.is_empty()).then(|| (name, prefs.portable()))
+            })
             .collect();
         serde_json::to_string_pretty(&config::SwitchingExport {
             version: config::SWITCHING_EXPORT_VERSION,
@@ -887,19 +1024,18 @@ impl Controller {
     /// Returns how many of this machine's monitors it matched.
     pub fn import_switching(&mut self, text: &str, cx: &mut Context<Self>) -> usize {
         let Ok(export) = serde_json::from_str::<config::SwitchingExport>(text) else {
-            self.notice = Some(tr!("The clipboard does not hold tarsier input-switch settings").into());
-            cx.notify();
+            self.show_notice(tr!("The clipboard does not hold tarsier input-switch settings"), cx);
             return 0;
         };
         let targets: Vec<(String, Option<u8>, MonitorPrefs)> = self
             .monitors
             .iter()
-            .filter_map(|m| {
-                Some((
-                    m.id().to_string(),
-                    m.current_input,
-                    export.monitors.get(&m.dev.name)?.clone(),
-                ))
+            .zip(self.transfer_names())
+            .filter_map(|(m, name)| {
+                let incoming = export.monitors.get(&name)?;
+                // An export from an older version could carry monitors nobody
+                // set up; they must not wipe one that is set up here.
+                (!incoming.endpoints.is_empty()).then(|| (m.id().to_string(), m.current_input, incoming.clone()))
             })
             .collect();
         let matched = targets.len();
@@ -911,7 +1047,7 @@ impl Controller {
             prefs.input_protocol = incoming.input_protocol;
             // Which port this computer is on cannot be copied — every machine
             // is plugged into a different one — so ask the monitor instead.
-            prefs.local_input = current;
+            prefs.local_input = current.filter(|port| prefs.endpoints.contains(port));
             if let Some(port) = prefs.local_input
                 && !prefs.is_named(port)
             {
@@ -919,15 +1055,14 @@ impl Controller {
             }
         }
         self.save_config();
-        self.notice = Some(
+        self.show_notice(
             if matched == 0 {
-                tr!("The clipboard settings do not match the monitors connected now").to_string()
+                tr!("The copied settings do not match any monitor connected here").to_string()
             } else {
                 tr!(n = matched, "Applied to 1 monitor" | "Applied to {n} monitors")
-            }
-            .into(),
+            },
+            cx,
         );
-        cx.notify();
         matched
     }
 
@@ -938,9 +1073,12 @@ impl Controller {
     /// the second one would never arrive. So the user names the destination up
     /// front and tarsier jumps straight there.
     pub fn open_switch_hud(&mut self, cx: &mut Context<Self>) {
-        if !self.switch_huds.is_empty() {
+        if self.switch_hud_opening || !self.switch_huds.is_empty() {
             return;
         }
+        self.switch_hud_opening = true;
+        self.switch_hud_generation += 1;
+        let generation = self.switch_hud_generation;
         // Remember who had the user's attention before the panel took it.
         self.switch_hud_return_to = platform::foreground_window();
         let this = cx.entity();
@@ -971,14 +1109,22 @@ impl Controller {
                 }
             }
             this.update(cx, |this, cx| {
+                this.switch_hud_opening = false;
                 this.switch_huds = handles;
                 cx.notify();
             });
         });
-        // A stray hotkey should never leave a panel parked over the desktop.
+        // A stray hotkey should never leave a panel parked over the desktop —
+        // but this timer belongs to this opening only, not to a panel opened
+        // after it was closed.
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(switch_hud::TIMEOUT).await;
-            this.update(cx, |this, cx| this.close_switch_hud(cx)).ok();
+            this.update(cx, |this, cx| {
+                if this.switch_hud_generation == generation {
+                    this.close_switch_hud(cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -986,7 +1132,7 @@ impl Controller {
     /// Closes the quick-switch panel wherever it is showing, and gives focus
     /// back to whatever had it beforehand. Safe to call when it is not open.
     pub fn close_switch_hud(&mut self, cx: &mut Context<Self>) {
-        let handles: Vec<_> = self.switch_huds.drain(..).collect();
+        let handles = std::mem::take(&mut self.switch_huds);
         let return_to = self.switch_hud_return_to.take();
         if handles.is_empty() && return_to.is_none() {
             return;
@@ -1047,7 +1193,8 @@ impl Controller {
 
         tray::TrayState {
             groups,
-            paused: self.is_paused() || !self.config.breaks.enabled,
+            paused: self.is_paused(),
+            reminders_off: !self.config.breaks.enabled,
             break_active: matches!(self.tracker.phase(), Phase::Prompted { .. }),
             language: self.config.language,
             tooltip: self.tooltip_text(),
@@ -1056,16 +1203,48 @@ impl Controller {
 
     /// One line summarising tarsier, shown when hovering the tray icon.
     pub fn tooltip_text(&self) -> String {
-        let score = self.today_score().map_or("--".to_string(), |s| s.to_string());
         let state = if !self.config.breaks.enabled {
             tr!("Break reminders are off").to_string()
         } else if self.is_paused() {
             tr!("Reminders are paused").to_string()
         } else {
-            let minutes = self.tracker.until_prompt().div_ceil(60);
-            tr!(n = minutes, "Break in 1 minute" | "Break in {n} minutes")
+            match self.tracker.phase() {
+                Phase::Prompted { .. } => tr!("On a break").to_string(),
+                Phase::Away => tr!("Away").to_string(),
+                Phase::Working => {
+                    let minutes = self.tracker.until_prompt().div_ceil(60);
+                    tr!(n = minutes, "Break in 1 minute" | "Break in {n} minutes")
+                }
+            }
         };
-        tr!("tarsier · {state} · {score} pts today", state = state, score = score)
+        match self.today_score() {
+            Some(score) => tr!("tarsier · {state} · health {score} today", state = state, score = score),
+            None => format!("tarsier · {state}"),
+        }
+    }
+
+    /// Shows `text` at the foot of the main window for a few seconds.
+    pub fn show_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.notice = Some(text.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_LIFETIME).await;
+            this.update(cx, |this, cx| {
+                // A newer notice has its own timer.
+                if this.notice.as_ref() == Some(&text) {
+                    this.dismiss_notice(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub fn show_main_window(&mut self, cx: &mut Context<Self>) {
@@ -1097,29 +1276,152 @@ pub fn apply_theme(skin: crate::skin::Skin, pref: config::ThemePref, cx: &mut Ap
     crate::skin::install(skin, cx);
 }
 
-#[cfg(test)]
-mod tests {
-    // Deliberately not `use super::*`: that would pull in GPUI's own `test`
-    // attribute macro, which shadows the built-in one and recurses.
-    use super::flip_destination;
-
-    #[test]
-    fn a_flip_refuses_to_guess_when_it_cannot_tell_which_way_to_go() {
-        let pair = [0x10, 0x12];
-        assert_eq!(flip_destination(pair, Some(0x10)), Some(0x12));
-        assert_eq!(flip_destination(pair, Some(0x12)), Some(0x10));
-        // A third device, or a reading the monitor will not give: guessing here
-        // used to send the monitor to the same endpoint it was already on, so
-        // the hotkey appeared to do nothing. The caller asks instead.
-        assert_eq!(flip_destination(pair, Some(0x0F)), None);
-        assert_eq!(flip_destination(pair, None), None);
-    }
-}
-
 fn dev_name(monitors: &[MonitorEntry], id: &str) -> String {
     monitors
         .iter()
         .find(|m| m.id() == id)
         .map(|m| m.dev.name.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `use super::*`: that would pull in GPUI's own `test` attribute.
+    use std::time::Duration;
+
+    use gpui_kit::TestAppContext;
+
+    use super::{Controller, MonitorEntry, NOTICE_LIFETIME, flip_destination};
+    use crate::config::{Config, MonitorPrefs};
+
+    #[test]
+    fn a_flip_refuses_to_guess_when_it_cannot_tell_which_way_to_go() {
+        let pair = [0x10, 0x12];
+        assert_eq!(flip_destination(pair, Some(0x10)), Some(0x12));
+        assert_eq!(flip_destination(pair, Some(0x12)), Some(0x10));
+        // A third device, or a reading the monitor will not give.
+        assert_eq!(flip_destination(pair, Some(0x0F)), None);
+        assert_eq!(flip_destination(pair, None), None);
+    }
+
+    fn set_up(config: &mut Config, id: &str, endpoints: &[u8], names: &[(u8, &str)]) {
+        config.monitors.insert(
+            id.to_string(),
+            MonitorPrefs {
+                endpoints: endpoints.to_vec(),
+                input_names: names.iter().map(|(p, n)| (*p, n.to_string())).collect(),
+                ..Default::default()
+            },
+        );
+    }
+
+    #[gpui_kit::test]
+    fn settings_travel_between_machines_without_clobbering_anything(cx: &mut TestAppContext) {
+        // Machine A: two identical monitors set up differently, and one never
+        // set up at all.
+        let mut config = Config::default();
+        set_up(&mut config, "a1", &[0x0F, 0x11], &[(0x0F, "Laptop"), (0x11, "Desktop")]);
+        set_up(&mut config, "a2", &[0x10, 0x12], &[(0x10, "NAS"), (0x12, "Console")]);
+        let a = cx.update(|cx| {
+            Controller::for_test(
+                config,
+                vec![
+                    MonitorEntry::fake("a1", "U2723QE", &[0x0F, 0x11]),
+                    MonitorEntry::fake("a2", "U2723QE", &[0x10, 0x12]),
+                    MonitorEntry::fake("a3", "LG 27GP950", &[0x0F, 0x11]),
+                ],
+                cx,
+            )
+        });
+        let export = cx.update(|cx| a.read(cx).export_switching());
+        assert!(export.contains("\"U2723QE (2)\""), "identical monitors are told apart");
+        assert!(!export.contains("27GP950"), "a monitor nobody set up is not exported");
+
+        // Machine B: the same pair, and its own LG already set up.
+        let mut config = Config::default();
+        set_up(&mut config, "b3", &[0x0F, 0x11], &[(0x0F, "Work"), (0x11, "Home")]);
+        let b = cx.update(|cx| {
+            Controller::for_test(
+                config,
+                vec![
+                    MonitorEntry::fake("b1", "U2723QE", &[0x11, 0x0F]),
+                    MonitorEntry::fake("b2", "U2723QE", &[0x12, 0x10]),
+                    MonitorEntry::fake("b3", "LG 27GP950", &[0x0F, 0x11]),
+                ],
+                cx,
+            )
+        });
+        let matched = b.update(cx, |c, cx| c.import_switching(&export, cx));
+        assert_eq!(matched, 2);
+        cx.update(|cx| {
+            let c = b.read(cx);
+            assert_eq!(c.monitor_prefs("b1").endpoints, vec![0x0F, 0x11]);
+            assert_eq!(c.monitor_prefs("b2").label(0x12), "Console");
+            // This machine is on whatever input its monitor shows, not on the
+            // port the exporting machine was on.
+            assert_eq!(c.monitor_prefs("b1").local_input, Some(0x11));
+            assert_eq!(c.monitor_prefs("b3").label(0x0F), "Work", "untouched by the import");
+        });
+
+        // Something that is not an export changes nothing and says so.
+        let matched = b.update(cx, |c, cx| c.import_switching("hello", cx));
+        assert_eq!(matched, 0);
+        assert!(cx.update(|cx| b.read(cx).notice.is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn the_tray_routes_by_monitor_id_and_shows_names(cx: &mut TestAppContext) {
+        let id = r"\\?\DISPLAY#GSM5BF6#1";
+        let mut config = Config::default();
+        set_up(&mut config, id, &[0x0F, 0x11], &[(0x11, "Desktop")]);
+        config.breaks.enabled = false;
+        let c = cx.update(|cx| {
+            Controller::for_test(
+                config,
+                vec![
+                    MonitorEntry::fake(id, "27GP950", &[0x0F, 0x11]),
+                    // One input: nothing to switch between, so not listed.
+                    MonitorEntry::fake("solo", "Laptop panel", &[0x0F]),
+                ],
+                cx,
+            )
+        });
+        let state = cx.update(|cx| c.read(cx).tray_state());
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].id, id);
+        let names: Vec<&str> = state.groups[0].endpoints.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["DisplayPort 1", "Desktop"]);
+        assert!(state.reminders_off && !state.paused);
+        assert_eq!(
+            cx.update(|cx| c.read(cx).tooltip_text()),
+            "tarsier · Break reminders are off"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_notice_clears_itself_unless_a_newer_one_arrived(cx: &mut TestAppContext) {
+        let c = cx.update(|cx| Controller::for_test(Config::default(), Vec::new(), cx));
+        c.update(cx, |c, cx| c.show_notice("first", cx));
+        cx.executor().advance_clock(NOTICE_LIFETIME / 2);
+        c.update(cx, |c, cx| c.show_notice("second", cx));
+        // The first notice's timer fires, but the notice is not its own any more.
+        cx.executor()
+            .advance_clock(NOTICE_LIFETIME / 2 + Duration::from_millis(1));
+        assert_eq!(cx.update(|cx| c.read(cx).notice.clone()).as_deref(), Some("second"));
+        cx.executor().advance_clock(NOTICE_LIFETIME);
+        assert_eq!(cx.update(|cx| c.read(cx).notice.clone()), None);
+    }
+
+    #[gpui_kit::test]
+    fn removing_this_computer_forgets_where_it_was(cx: &mut TestAppContext) {
+        let mut config = Config::default();
+        set_up(&mut config, "m", &[0x0F, 0x10, 0x11], &[]);
+        config.monitors.get_mut("m").unwrap().local_input = Some(0x10);
+        let c =
+            cx.update(|cx| Controller::for_test(config, vec![MonitorEntry::fake("m", "M", &[0x0F, 0x10, 0x11])], cx));
+        c.update(cx, |c, cx| c.remove_endpoint("m", 0x10, cx));
+        let prefs = cx.update(|cx| c.read(cx).monitor_prefs("m"));
+        assert_eq!(prefs.endpoints, vec![0x0F, 0x11]);
+        assert_eq!(prefs.local_input, None, "no other port is guessed in its place");
+    }
 }

@@ -110,6 +110,56 @@ impl Monitor {
     }
 }
 
+/// A monitor that answers every command from memory, for tests of the layers
+/// above this one. `inputs` is what it claims in its capabilities string.
+#[cfg(test)]
+impl Monitor {
+    pub fn fake(id: &str, name: &str, inputs: &[u8]) -> Self {
+        struct Fake(Mutex<BTreeMap<u8, u32>>);
+        impl VcpChannel for Fake {
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+            fn get(&self, code: u8) -> Result<Feature> {
+                let current = *self.0.lock().unwrap().get(&code).unwrap_or(&50);
+                Ok(Feature { current, max: 100 })
+            }
+            fn set(&self, code: u8, value: u32) -> Result<()> {
+                self.0.lock().unwrap().insert(code, value);
+                Ok(())
+            }
+            fn capabilities(&self) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let caps = (!inputs.is_empty()).then(|| {
+            let list: Vec<String> = inputs.iter().map(|p| format!("{p:02X}")).collect();
+            mccs::parse_capabilities(&format!("(model({name})vcp(10 12 60({})))", list.join(" ")))
+        });
+        let selected = input::select(None, caps.as_ref(), None);
+        Monitor {
+            id: id.to_string(),
+            name: name.to_string(),
+            caps,
+            diagnostics: Diagnostics {
+                target: Default::default(),
+                adapter: None,
+                identity: None,
+                capabilities: Ok(String::new()),
+                input_protocol: selected.protocol.name(),
+                input_protocol_reason: selected.reason,
+                raw_backends: Vec::new(),
+            },
+            trace: Arc::new(Trace::default()),
+            bus: Mutex::new(()),
+            vcp: Box::new(Fake(Mutex::new(BTreeMap::new()))),
+            raw: None,
+            input: selected.protocol,
+        }
+    }
+}
+
 fn retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     let mut last = None;
     for _ in 0..RETRIES {

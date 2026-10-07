@@ -111,12 +111,18 @@ pub fn enumerate() -> Result<Vec<Found>> {
             // PHYSICAL_MONITOR is packed; copy the array out before borrowing it.
             let description = wide_to_string(&{ pm.szPhysicalMonitorDescription });
             let display = names.get(&gdi_name);
+            // Mirrored displays share one source, and so one device path. The
+            // first keeps the bare path, which is what earlier versions saved
+            // its settings under; the others are numbered so a slider moves the
+            // monitor it is drawn for.
+            let id = match display.map(|d| d.device_path.as_str()).filter(|p| !p.is_empty()) {
+                Some(path) if i == 0 => path.to_string(),
+                Some(path) => format!("{path}#{i}"),
+                None => format!("{gdi_name}#{i}"),
+            };
             found.push(Found {
                 channel,
-                id: display
-                    .map(|d| d.device_path.clone())
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| format!("{gdi_name}#{i}")),
+                id,
                 friendly_name: display.map(|d| d.friendly.clone()).filter(|n| !n.is_empty()),
                 adapter: adapters.get(&gdi_name).cloned(),
                 target: DisplayTarget {

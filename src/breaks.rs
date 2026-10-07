@@ -142,9 +142,18 @@ impl BreakTracker {
                     self.end_session(now - dt as i64, BreakKind::Natural, &mut events);
                 } else {
                     self.session_active += dt.min(MAX_TICK);
-                    if self.session_active >= self.next_prompt_at && !suppressed {
-                        self.phase = Phase::Prompted { rested: 0, elapsed: 0 };
-                        events.push(BreakEvent::PromptBreak);
+                    if self.session_active >= self.next_prompt_at {
+                        if !suppressed {
+                            self.phase = Phase::Prompted { rested: 0, elapsed: 0 };
+                            events.push(BreakEvent::PromptBreak);
+                        } else if idle >= self.settings.break_secs {
+                            // Unsuppressed, this is a reminder that finishes the
+                            // moment it opens, because the user is already a full
+                            // break away. Held back, it must still count — or the
+                            // time away is scored as work and the reminder lands
+                            // the second they come back.
+                            self.end_session(now, BreakKind::Natural, &mut events);
+                        }
                     }
                 }
             }
@@ -157,7 +166,10 @@ impl BreakTracker {
                 }
                 if rested >= self.settings.break_secs || idle >= self.settings.break_secs {
                     events.push(BreakEvent::BreakFinished);
-                    self.end_session(now, BreakKind::Prompted, &mut events);
+                    // After a sleep the session ended when the lid closed, not
+                    // when it opened — which may be the next day.
+                    let end = if dt > MAX_TICK { now - dt as i64 } else { now };
+                    self.end_session(end, BreakKind::Prompted, &mut events);
                 } else if elapsed >= self.settings.break_secs * IGNORE_FACTOR {
                     events.push(BreakEvent::BreakIgnored);
                     self.phase = Phase::Working;
@@ -384,6 +396,84 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].active_secs, 100);
         assert_eq!(t.session_active(), 0);
+    }
+
+    #[test]
+    fn a_due_break_taken_while_reminders_are_held_back_still_counts() {
+        let mut now = 0;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        // Paused, and the reminder comes due while the user is at the desk.
+        let ev = run(&mut t, &mut now, 650, |_| 0, true);
+        assert!(ev.is_empty());
+        // Then they walk away for longer than a break.
+        let ev = run(&mut t, &mut now, 200, |i| i, true);
+        let s = sessions(&ev);
+        assert_eq!(s.len(), 1, "the time away ended the session");
+        assert_eq!(s[0].kind, BreakKind::Natural);
+        assert_eq!(t.phase(), Phase::Away);
+        // Coming back starts afresh instead of reminding at once.
+        let ev = run(&mut t, &mut now, 1, |_| 0, false);
+        assert_eq!(ev, vec![BreakEvent::Returned]);
+        assert_eq!(t.until_prompt(), SETTINGS.work_secs);
+    }
+
+    #[test]
+    fn idle_before_the_break_is_due_is_still_work_even_when_held_back() {
+        let mut now = 0;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        let ev = run(&mut t, &mut now, 300, |i| i, true);
+        assert!(ev.is_empty());
+        assert_eq!(t.session_active(), 300);
+    }
+
+    #[test]
+    fn sleeping_through_a_reminder_ends_the_session_when_the_sleep_began() {
+        let mut now = 1_000;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        run(&mut t, &mut now, 600, |_| 0, false);
+        assert!(matches!(t.phase(), Phase::Prompted { .. }));
+        let slept_at = now;
+        now += 8 * 3600;
+        let ev = t.tick(now, 8 * 3600, 0, false);
+        assert!(ev.contains(&BreakEvent::BreakFinished));
+        assert_eq!(sessions(&ev)[0].end, slept_at);
+    }
+
+    #[test]
+    fn coming_back_starts_a_fresh_session() {
+        let mut now = 0;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        run(&mut t, &mut now, 100, |_| 0, false);
+        now += 3600;
+        t.tick(now, 3600, 3600, false);
+        assert_eq!(t.phase(), Phase::Away);
+        // Still away: nothing happens.
+        assert!(run(&mut t, &mut now, 10, |_| 4000, false).is_empty());
+        // Input again: a new session starts from the moment of that input.
+        let ev = t.tick(now + 1, 1, 0, false);
+        assert_eq!(ev, vec![BreakEvent::Returned]);
+        assert_eq!(t.phase(), Phase::Working);
+        assert_eq!(t.session_start(), now + 1);
+        assert_eq!(t.session_active(), 0);
+    }
+
+    #[test]
+    fn a_new_work_length_moves_the_next_reminder() {
+        let mut now = 0;
+        let mut t = BreakTracker::new(SETTINGS, now);
+        run(&mut t, &mut now, 100, |_| 0, false);
+        t.set_settings(BreakSettings {
+            work_secs: 300,
+            ..SETTINGS
+        });
+        assert_eq!(t.until_prompt(), 200);
+        // Changing only the break length leaves the reminder where it was.
+        t.set_settings(BreakSettings {
+            work_secs: 300,
+            break_secs: 60,
+            ..SETTINGS
+        });
+        assert_eq!(t.until_prompt(), 200);
     }
 
     #[test]

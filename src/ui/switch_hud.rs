@@ -12,11 +12,12 @@ use std::time::Duration;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::*;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::controller::Controller;
+use crate::display::mccs::input_source_name;
 use crate::i18n::tr;
+use crate::skin::Voice;
 
 /// Long enough to read and choose, short enough that a stray hotkey does not
 /// leave a panel parked on screen.
@@ -53,6 +54,8 @@ struct Entry {
     monitor: String,
     port: u8,
     name: String,
+    /// Its place on its monitor, which picks its colour, as everywhere else.
+    slot: usize,
 }
 
 fn panel_entries(controller: &Controller) -> Vec<Entry> {
@@ -63,11 +66,12 @@ fn panel_entries(controller: &Controller) -> Vec<Entry> {
             let ports = controller.endpoints(m);
             let id = m.id().to_string();
             let monitor = m.dev.name.clone();
-            ports.into_iter().map(move |port| Entry {
+            ports.into_iter().enumerate().map(move |(slot, port)| Entry {
                 id: id.clone(),
                 monitor: monitor.clone(),
                 port,
                 name: controller.input_label(&id, port),
+                slot,
             })
         })
         .collect()
@@ -75,6 +79,7 @@ fn panel_entries(controller: &Controller) -> Vec<Entry> {
 
 impl Render for SwitchHud {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let skin = crate::skin::active(cx);
         let theme = cx.theme();
         let entries = panel_entries(self.controller.read(cx));
         let multi = {
@@ -91,108 +96,94 @@ impl Render for SwitchHud {
                 .gap_3()
                 .items_center()
                 .px_2()
-                .py_1()
-                .rounded_md()
-                .hover(|s| s.bg(theme.muted))
+                .py_1p5()
+                .rounded(theme.radius)
+                .hover(|s| s.bg(theme.accent))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.controller.update(cx, |c, cx| {
                         c.close_switch_hud(cx);
                         c.switch_input(&id, port, cx);
                     });
                 }))
+                .child(skin.key_cap(&format!("{}", ix + 1), cx))
+                .child(skin.swatch(skin.identity(entry.slot, cx), cx))
                 .child(
                     div()
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{}", ix + 1)),
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .font_weight(skin.weight(Voice::Plain))
+                        .child(entry.name.clone()),
                 )
-                .child(div().text_sm().child(entry.name.clone()))
-                .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(crate::display::mccs::input_source_name(entry.port)),
-                )
-                .when(multi, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(entry.monitor.clone()),
-                    )
-                })
+                .child(div().text_xs().text_color(theme.muted_foreground).child(if multi {
+                    format!("{} · {}", entry.monitor, input_source_name(entry.port))
+                } else {
+                    input_source_name(entry.port)
+                }))
         });
 
-        v_flex().size_full().flex().items_center().justify_center().child(
-            v_flex()
-                .id("switch-hud")
-                .track_focus(&self.focus)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    let key = event.keystroke.key.as_str();
-                    if key == "escape" {
+        // The panel is a window of its own, without the main window's root, so
+        // it names the skin's font itself.
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .font(skin.font(cx))
+            .text_color(theme.foreground)
+            .child(
+                skin.card(cx)
+                    .id("switch-hud")
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if key == "escape" {
+                            this.controller.update(cx, |c, cx| c.close_switch_hud(cx));
+                            return;
+                        }
+                        let Some(index) = key.parse::<usize>().ok().filter(|n| *n > 0) else {
+                            return;
+                        };
+                        // Same order as the rows, so the printed number is
+                        // always the key that reaches it.
+                        let target = panel_entries(this.controller.read(cx))
+                            .into_iter()
+                            .nth(index - 1)
+                            .map(|e| (e.id, e.port));
+                        if let Some((id, port)) = target {
+                            this.controller.update(cx, |c, cx| {
+                                c.close_switch_hud(cx);
+                                c.switch_input(&id, port, cx);
+                            });
+                        }
+                    }))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.controller.update(cx, |c, cx| c.close_switch_hud(cx));
-                        return;
-                    }
-                    let Ok(index) = key.parse::<usize>() else {
-                        return;
-                    };
-                    if index == 0 {
-                        return;
-                    }
-                    // Same order as the rendered rows, so the printed number
-                    // is always the key that reaches it.
-                    let target = panel_entries(this.controller.read(cx))
-                        .into_iter()
-                        .nth(index - 1)
-                        .map(|e| (e.id, e.port));
-                    if let Some((id, port)) = target {
-                        this.controller.update(cx, |c, cx| {
-                            c.close_switch_hud(cx);
-                            c.switch_input(&id, port, cx);
-                        });
-                    }
-                }))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.controller.update(cx, |c, cx| c.close_switch_hud(cx));
-                }))
-                .w(px(300.))
-                .p_3()
-                .gap_1()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .pt_2()
-                        .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(tr!("Switch monitor input")),
-                        ),
-                )
-                .children(rows)
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .pt_2()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(tr!("Press a number to jump straight there"))
-                        .child(tr!("Esc to cancel")),
-                ),
-        )
+                    }))
+                    .w(px(340.))
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .pb_1()
+                            .child(Icon::new(Lucide::ArrowLeftRight).size(px(14.)))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(skin.weight(Voice::Loud))
+                                    .child(tr!("Switch monitor input")),
+                            ),
+                    )
+                    .children(rows)
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .pt_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(tr!("Press a number to jump straight there"))
+                            .child(tr!("Esc to cancel")),
+                    ),
+            )
     }
 }

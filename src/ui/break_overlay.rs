@@ -99,6 +99,9 @@ impl Render for BreakOverlay {
 
         div()
             .size_full()
+            // A window of its own, without the main window's root: the skin's
+            // typeface has to be named here too.
+            .font(crate::skin::active(cx).font(cx))
             .bg(hsla(220. / 360., 0.35, 0.06, MAX_DIM * visibility))
             .text_color(fg)
             .flex()

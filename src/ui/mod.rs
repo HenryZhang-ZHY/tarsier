@@ -1,4 +1,5 @@
 pub mod break_overlay;
+mod kit;
 pub mod main_window;
 mod number_field;
 pub mod switch_hud;
@@ -16,13 +17,11 @@ icon_assets!(
         Activity,
         ArrowLeftRight,
         Bug,
-        ChartColumn,
+        ClipboardPaste,
         Coffee,
         Contrast,
         Flame,
-        Laptop,
         Monitor,
-        Power,
         RefreshCw,
         Sun,
         Timer,

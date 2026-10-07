@@ -8,15 +8,17 @@
 
 **The countdown only runs while you are genuinely idle** — jiggling the mouse doesn't count as a break; you have to actually leave the keyboard and mouse. Leaving the keyboard and mouse alone is not treated as leaving — the timer keeps running. Sleeping for longer than `break_minutes` is recorded as a break automatically. If you step away, the reminder still appears and completes by itself once you have been hands-off long enough.
 
-To snooze or skip, use the tray menu or the **Breaks & stats** tab of the main window — which is also where the running timer, today's score and the last seven days are, on one page rather than two.
+To snooze or skip, use the tray menu or the **Breaks** tab of the main window — which is also where the running timer, today's score and the last seven days are, on one page.
 
 ## Ignoring
 
-If you keep working under the overlay, it fades out on its own at twice `work_minutes`, the session is recorded as **ignored**, and the reminder comes back after `snooze_minutes`.
+If you keep working under the overlay, it fades out on its own once it has been up for twice `break_minutes`, the reminder is recorded as **ignored**, and the reminder comes back after `snooze_minutes`.
 
 ## Staying out of the way
 
 With `respect_fullscreen` enabled, reminders are held while a fullscreen game, video, or presentation is detected.
+
+A held-back reminder (paused, turned off, or fullscreen) still notices a break: once a reminder is due, being hands-off for a full `break_minutes` ends the session as a break, exactly as an unsuppressed reminder would have finished. Coming back then starts a fresh timer rather than reminding you at once.
 
 ## Scoring rules
 
