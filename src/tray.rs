@@ -253,46 +253,99 @@ fn build_menu(state: &TrayState) -> MenuResult<(Menu, Built)> {
     Ok((menu, built))
 }
 
-pub struct Hotkey {
-    _manager: GlobalHotKeyManager,
-    bindings: Vec<(u32, Command)>,
-    pub errors: Vec<String>,
+/// Which command a global hotkey runs, named by the config field it lives in.
+///
+/// The list of hotkeys is [`crate::config::HOTKEY_FIELDS`]; this is the one
+/// thing that table deliberately does not carry, because what a hotkey *does*
+/// is a tray matter and the config knows nothing about the tray. The test below
+/// is what keeps the two in step when a hotkey is added.
+fn command_for(key: &str) -> Option<Command> {
+    Some(match key {
+        "toggle_input" => Command::ToggleInput,
+        "brightness_up" => Command::BrightnessUp,
+        "brightness_down" => Command::BrightnessDown,
+        "break_now" => Command::BreakNow,
+        _ => return None,
+    })
 }
 
-impl Hotkey {
-    pub fn new(keys: &Hotkeys) -> Result<Self> {
-        let manager = GlobalHotKeyManager::new()?;
-        let mut bindings = Vec::new();
-        let mut errors = Vec::new();
-        for (spec, cmd) in [
-            (&keys.toggle_input, Command::ToggleInput),
-            (&keys.brightness_up, Command::BrightnessUp),
-            (&keys.brightness_down, Command::BrightnessDown),
-            (&keys.break_now, Command::BreakNow),
-        ] {
-            if spec.trim().is_empty() {
+/// The registered global hotkeys, and the routing from their events back to
+/// commands.
+///
+/// Rebuilt in place when a combination is recorded on the Settings tab. Every
+/// binding is dropped and re-registered rather than the changed one alone:
+/// `RegisterHotKey` refuses a combination another action still holds, and for a
+/// combination that has just moved between two of our own actions that refusal
+/// is tarsier refusing itself.
+pub struct HotkeyRegistry {
+    manager: GlobalHotKeyManager,
+    /// What is registered right now: what to unregister, and how an incoming
+    /// event's id finds its command.
+    bindings: Vec<(HotKey, Command)>,
+    errors: Vec<String>,
+}
+
+impl HotkeyRegistry {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            manager: GlobalHotKeyManager::new()?,
+            bindings: Vec::new(),
+            errors: Vec::new(),
+        })
+    }
+
+    /// Makes the registered hotkeys match `keys`. Returns what could not be
+    /// registered, as `<spec>: <reason>`, which is what the Settings tab shows.
+    ///
+    /// A spec that will not parse is reported rather than skipped in silence:
+    /// the config is hand-editable, and a typo there used to disable one hotkey
+    /// with nothing said about it.
+    pub fn apply(&mut self, keys: &Hotkeys) -> Vec<String> {
+        self.clear();
+        self.errors.clear();
+
+        for field in crate::config::HOTKEY_FIELDS {
+            let spec = (field.get)(keys).trim();
+            if spec.is_empty() {
                 continue;
             }
+            let Some(command) = command_for(field.key) else {
+                continue;
+            };
             match HotKey::from_str(spec) {
-                Ok(hotkey) => match manager.register(hotkey) {
-                    Ok(()) => bindings.push((hotkey.id(), cmd)),
-                    Err(e) => errors.push(format!("{spec}: {e}")),
+                Ok(hotkey) => match self.manager.register(hotkey) {
+                    Ok(()) => self.bindings.push((hotkey, command)),
+                    Err(e) => self.errors.push(format!("{spec}: {e}")),
                 },
-                Err(e) => errors.push(format!("{spec}: {e}")),
+                Err(e) => self.errors.push(format!("{spec}: {e}")),
             }
         }
-        Ok(Self {
-            _manager: manager,
-            bindings,
-            errors,
-        })
+        self.errors.clone()
+    }
+
+    /// Releases every registered combination, and remembers nothing about them.
+    ///
+    /// Used while one is being recorded: the user is about to press the keys
+    /// they want, and a binding that is still live would run as well — the
+    /// screen would switch input in the middle of being asked which keys should
+    /// switch input.
+    pub fn clear(&mut self) {
+        let registered: Vec<HotKey> = self.bindings.iter().map(|(hotkey, _)| *hotkey).collect();
+        if let Err(e) = self.manager.unregister_all(&registered) {
+            log::warn!("unregistering hotkeys: {e}");
+        }
+        self.bindings.clear();
+    }
+
+    pub fn errors(&self) -> &[String] {
+        &self.errors
     }
 
     pub fn poll(&self) -> Vec<Command> {
         let mut commands = Vec::new();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state() == HotKeyState::Pressed
-                && let Some((_, cmd)) = self.bindings.iter().find(|(id, _)| *id == event.id())
+                && let Some((_, cmd)) = self.bindings.iter().find(|(hotkey, _)| hotkey.id() == event.id())
             {
                 commands.push(cmd.clone());
             }
@@ -362,6 +415,18 @@ mod tests {
             .into_iter()
             .filter(|item| matches!(item, tray_icon::menu::MenuItemKind::Submenu(_)))
             .count()
+    }
+
+    #[test]
+    fn every_hotkey_in_the_config_has_a_command() {
+        // Two lists that have to agree: the fields the config stores, and the
+        // commands the tray runs for them. A hotkey with no arm in
+        // `command_for` would still be listed on the Settings tab, and would be
+        // registered by nobody — a row that silently does nothing.
+        for field in crate::config::HOTKEY_FIELDS {
+            assert!(command_for(field.key).is_some(), "{} has no command", field.key);
+        }
+        assert!(command_for("no_such_hotkey").is_none());
     }
 
     #[test]

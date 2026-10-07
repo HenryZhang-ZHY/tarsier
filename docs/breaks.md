@@ -8,7 +8,7 @@
 
 **The countdown only runs while you are genuinely idle** — jiggling the mouse doesn't count as a break; you have to actually leave the keyboard and mouse. Leaving the keyboard and mouse alone is not treated as leaving — the timer keeps running. Sleeping for longer than `break_minutes` is recorded as a break automatically. If you step away, the reminder still appears and completes by itself once you have been hands-off long enough.
 
-To snooze or skip, use the tray menu or the Breaks tab of the main window.
+To snooze or skip, use the tray menu or the **Breaks & stats** tab of the main window — which is also where the running timer, today's score and the last seven days are, on one page rather than two.
 
 ## Ignoring
 

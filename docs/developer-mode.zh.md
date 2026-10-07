@@ -2,7 +2,7 @@
 
 [English](developer-mode.md) · **简体中文** · [返回 README](../README.zh.md)
 
-在设置页打开（或把 `config.json` 里的 `developer_mode` 设为 `true`）。
+在**设置 → 高级**里打开（或把 `config.json` 里的 `developer_mode` 设为 `true`）。
 
 打开后：
 

@@ -37,7 +37,9 @@ It stays in the tray; double-click the tray icon to open the main window.
 | `Ctrl+Alt+I` | Switch monitor input. Two computers: a blind flip. Three or more: a quick-switch panel, jump by number |
 | `Ctrl+Alt+PageUp` / `PageDown` | Brightness ±10% on every monitor |
 
-Hotkeys, break durations, and everything else live on the Settings tab of the main window, or in `%APPDATA%\tarsier\config.json`.
+The window has three tabs — **Monitors**, **Breaks & stats** and **Settings** — and the Settings tab is split into sections down the left (General, Breaks, Displays, Hotkeys, Advanced), so a setting is one click from its name rather than somewhere in a long column.
+
+**Hotkeys are recorded in the UI**: click Record next to one, press the combination, and it takes effect immediately. No config file, no restart. Everything else lives on the Settings tab, or in `%APPDATA%\tarsier\config.json`.
 
 ## Documentation
 

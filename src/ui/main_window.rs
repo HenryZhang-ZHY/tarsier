@@ -46,15 +46,66 @@ pub fn open(controller: Entity<Controller>, cx: &mut App) -> Option<AnyWindowHan
     .ok()
 }
 
+/// The window's pages.
+///
+/// Breaks and statistics are one page rather than two: they are the same
+/// "eye habits" data seen from two sides, and splitting them meant leaving the
+/// running timer to go and read the score it produces.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Monitors,
     Breaks,
-    Stats,
     Settings,
 }
 
-const TABS: [Tab; 4] = [Tab::Monitors, Tab::Breaks, Tab::Stats, Tab::Settings];
+const TABS: [Tab; 3] = [Tab::Monitors, Tab::Breaks, Tab::Settings];
+
+/// A section of the Settings tab. One is shown at a time, picked from the list
+/// down the left: every setting in one column was a page nobody read to the end,
+/// and it made the two or three rows a user actually came for hard to find.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    General,
+    Breaks,
+    Displays,
+    Hotkeys,
+    Advanced,
+}
+
+const SECTIONS: [Section; 5] = [
+    Section::General,
+    Section::Breaks,
+    Section::Displays,
+    Section::Hotkeys,
+    Section::Advanced,
+];
+
+impl Section {
+    /// Short names: the list is a column down the side of a 580px window, and a
+    /// nav label that has to be truncated to fit is not a label any more. What
+    /// each section holds is said by the cards it opens.
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => tr!("General"),
+            Self::Breaks => tr!("Breaks"),
+            Self::Displays => tr!("Displays"),
+            Self::Hotkeys => tr!("Hotkeys"),
+            Self::Advanced => tr!("Advanced"),
+        }
+    }
+
+    /// The section's name in English, for element ids. An id has to survive the
+    /// language changing, or switching to Chinese rebuilds every row on the page.
+    fn key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Breaks => "breaks",
+            Self::Displays => "displays",
+            Self::Hotkeys => "hotkeys",
+            Self::Advanced => "advanced",
+        }
+    }
+}
 
 /// Editable break durations: (key, label, range, getter, setter).
 type BreakField = (
@@ -103,6 +154,15 @@ const BREAK_FIELDS: [BreakField; 3] = [
 pub struct MainWindow {
     controller: Entity<Controller>,
     tab: Tab,
+    /// Which Settings section is on screen. Kept while the tab is left and come
+    /// back to, so the window returns where the user was.
+    section: Section,
+    /// The hotkey waiting for a combination, if the user pressed Record. Holds
+    /// the config field's name, which is what identifies a row.
+    recording: Option<&'static str>,
+    /// Focus while recording. The panel that owns it is what receives the
+    /// keystroke; nothing else in the window has to know recording is on.
+    hotkey_focus: FocusHandle,
     sliders: HashMap<(String, u8), Entity<SliderState>>,
     /// Typed value fields: brightness/contrast keyed `"{monitor}#{code}"`, break durations by name.
     numbers: HashMap<String, NumberField>,
@@ -216,6 +276,26 @@ impl MainWindow {
                 crate::controller::apply_theme(skin, pref, cx);
             }
         });
+        // Looking away ends the recording. Clicking another tab, another
+        // section, or anywhere outside the panel takes focus with it, and a row
+        // left armed behind the user's back would swallow the next keystroke
+        // they pressed for something else.
+        let hotkey_focus = cx.focus_handle();
+        let blurred = cx.on_blur(&hotkey_focus, window, |this, _, cx| {
+            if this.recording.take().is_some() {
+                this.controller.update(cx, |c, cx| c.hold_hotkeys(false, cx));
+                cx.notify();
+            }
+        });
+        // Switching to another application ends it too. Recording has the global
+        // hotkeys released, so an armed row in a window the user has walked away
+        // from is an app whose hotkeys quietly do nothing.
+        let deactivated = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() && this.recording.take().is_some() {
+                this.controller.update(cx, |c, cx| c.hold_hotkeys(false, cx));
+                cx.notify();
+            }
+        });
         let mut numbers = HashMap::new();
         let breaks = controller.read(cx).config.breaks.clone();
         for (key, _, range, get, set) in BREAK_FIELDS {
@@ -232,12 +312,15 @@ impl MainWindow {
         let mut this = Self {
             controller,
             tab: Tab::Monitors,
+            section: Section::General,
+            recording: None,
+            hotkey_focus,
             sliders: HashMap::new(),
             numbers,
             names: HashMap::new(),
             port_picker: None,
             setup: HashMap::new(),
-            _subscriptions: vec![observe, appearance],
+            _subscriptions: vec![observe, appearance, blurred, deactivated],
         };
         this.sync_controls(window, cx);
         this
@@ -593,8 +676,7 @@ impl MainWindow {
                         )
                         .label(tr!("Set up on the Settings tab"))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.tab = Tab::Settings;
-                            cx.notify();
+                            this.open_section(Section::Displays, cx);
                         })),
                 )
                 .into_any_element();
@@ -688,8 +770,7 @@ impl MainWindow {
                             )
                             .label(tr!("Name them on the Settings tab"))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.tab = Tab::Settings;
-                                cx.notify();
+                                this.open_section(Section::Displays, cx);
                             })),
                         ),
                 )
@@ -794,6 +875,10 @@ impl MainWindow {
                 .child(
                     h_flex()
                         .gap_2()
+                        // The two labels together are wider than the settings
+                        // column, so they wrap onto a second row rather than
+                        // running off the edge of the panel.
+                        .flex_wrap()
                         .child(
                             skin(cx).button(
                                 SharedString::from(format!("wizard-next-{idx}")),
@@ -950,6 +1035,7 @@ impl MainWindow {
             .child(
                 h_flex()
                     .gap_2()
+                    .flex_wrap()
                     .child(
                         skin(cx).button(
                             SharedString::from(format!("wizard-back-{idx}")),
@@ -1189,19 +1275,20 @@ impl MainWindow {
             .into_any_element()
     }
 
-    /// One monitor's block in the Settings tab's input card: the first-run
-    /// wizard while it has not been through setup, the editable list after.
+    /// One monitor's card on the Settings tab's input section: what the hotkey
+    /// does here, the first-run wizard while it has not been through setup, and
+    /// the editable list of computers and names after.
     fn render_input_settings(&self, idx: usize, m: &MonitorEntry, c: &Controller, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let id = m.id().to_string();
         let inputs = c.inputs_for(m);
+        let endpoints = c.endpoints(m);
 
         let body: AnyElement = match self.setup.get(&id) {
             // `naming` is checked as well so an import landing mid-wizard
             // takes effect on this paint rather than the next one.
             Some(setup) if setup.naming || !c.endpoints_configured(m) => self.render_wizard(idx, m, setup, &inputs, cx),
             _ => {
-                let endpoints = c.endpoints(m);
                 if endpoints.is_empty() {
                     div()
                         .text_xs()
@@ -1215,25 +1302,73 @@ impl MainWindow {
             }
         };
 
-        v_flex()
-            .gap_2()
+        // What the hotkey does on this monitor, said in the header: with two
+        // computers a press is a blind flip, and from three it has to ask. Which
+        // of the two it is decides whether there is a panel worth previewing at
+        // all — a two-computer monitor never shows one.
+        let mode = if endpoints.is_empty() {
+            tr!("Not set up yet")
+        } else if endpoints.len() == 2 {
+            tr!("One-key flip")
+        } else {
+            tr!("Quick-switch panel")
+        };
+
+        card(cx)
+            .gap_3()
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(skin(cx).weight(Voice::Plain))
-                    .child(m.dev.name.clone()),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(skin(cx).weight(Voice::Plain))
+                            .child(m.dev.name.clone()),
+                    )
+                    .child(skin(cx).chip(mode, Tone::Muted, cx)),
             )
             .child(body)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .when(endpoints.len() >= 3, |el| {
+                        let controller = self.controller.clone();
+                        el.child(
+                            skin(cx)
+                                .button(
+                                    SharedString::from(format!("preview-{idx}")),
+                                    Tone::Ghost,
+                                    Control::Tiny,
+                                    cx,
+                                )
+                                .label(tr!("Preview quick-switch panel"))
+                                .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.open_switch_hud(cx))),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .when(endpoints.len() >= 2, |el| {
+                        el.child(hotkey_caps(&c.config.hotkeys.toggle_input, cx))
+                    }),
+            )
             .into_any_element()
     }
 
-    // ---- breaks tab --------------------------------------------------------
+    // ---- breaks and statistics ---------------------------------------------
 
+    /// The eye-habits page: where this stretch of work stands, and how the days
+    /// behind it went.
+    ///
+    /// Breaks and statistics are one page because they are one subject — the
+    /// score is nothing but the sessions the timer above it is producing — and
+    /// reading it meant leaving the timer you were looking at to go and find it.
     fn render_breaks(&self, cx: &mut Context<Self>) -> AnyElement {
         let c = self.controller.read(cx);
         let theme = cx.theme();
         let t = &c.tracker;
         let work = t.settings().work_secs;
+
         let (title, detail) = match t.phase() {
             _ if !c.config.breaks.enabled => (
                 tr!("Break reminders are off").to_string(),
@@ -1245,24 +1380,50 @@ impl MainWindow {
             ),
             Phase::Prompted { .. } => (
                 tr!("Taking a break").to_string(),
-                tr!("Rest for another {time}", time = format_minutes(t.rest_remaining())),
+                tr!("Relaxing… the countdown runs while you are away from the keyboard and mouse").to_string(),
             ),
             Phase::Working => (
-                tr!("Working for {time}", time = format_minutes(t.session_active())),
+                tr!("Working for {time}", time = format_minutes(t.session_active())).to_string(),
                 if c.is_paused() {
                     tr!("Reminders are paused").to_string()
                 } else {
-                    tr!("Break in {time}", time = format_minutes(t.until_prompt()))
+                    tr!("When the time is up, a full-screen reminder fades in; stepping away counts as a break automatically")
+                        .to_string()
                 },
             ),
         };
+
+        // The one number this card exists for — when the next break is due, or
+        // how long the current one has left — beside the title rather than in
+        // the fine print under the bar, where it was the last thing read.
+        let pill: Option<AnyElement> = if !c.config.breaks.enabled || c.is_paused() {
+            None
+        } else {
+            match t.phase() {
+                Phase::Prompted { .. } => Some(skin(cx).chip(
+                    &tr!("Rest for another {time}", time = format_minutes(t.rest_remaining())),
+                    Tone::Muted,
+                    cx,
+                )),
+                Phase::Working => Some(skin(cx).chip(
+                    &tr!("Break in {time}", time = format_minutes(t.until_prompt())),
+                    Tone::Muted,
+                    cx,
+                )),
+                Phase::Away => None,
+            }
+        };
+
         let progress = (t.session_active() as f32 / work.max(1) as f32 * 100.0).min(100.0);
         let over = t.session_active() > work;
 
         let today = local_date(now_ts());
         let empty = Default::default();
         let day = c.stats.day(today).unwrap_or(&empty);
-        let score = c.today_score();
+        let today_score = c.today_score();
+        let streak = c.stats.streak(today, today_score);
+        let points = c.stats.total_points();
+        let (level, level_min, next) = stats::level(points);
 
         let controller = self.controller.clone();
         let controller2 = self.controller.clone();
@@ -1273,7 +1434,9 @@ impl MainWindow {
                     .gap_2()
                     .items_center()
                     .child(Icon::new(Lucide::Timer))
-                    .child(div().text_lg().font_weight(skin(cx).weight(Voice::Loud)).child(title)),
+                    .child(div().text_lg().font_weight(skin(cx).weight(Voice::Loud)).child(title))
+                    .child(div().flex_1())
+                    .children(pill),
             )
             .child(
                 Progress::new("work")
@@ -1324,60 +1487,8 @@ impl MainWindow {
                     )
             });
 
-        let score_card = card(cx)
-            .gap_2()
-            .child(section_label(tr!("Today's health score"), cx))
-            .child(
-                h_flex()
-                    .items_end()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(48.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(score_color(score, cx))
-                            .child(score.map_or("--".to_string(), |s| s.to_string())),
-                    )
-                    .child(div().pb_2().text_lg().child(
-                        score.map_or(tr!("Scoring starts after 15 minutes of use"), stats::grade),
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_4()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(tr!(
-                        "Screen time {time}",
-                        time = format_minutes(day.active_secs() + t.session_active())
-                    ))
-                    .child(tr!(n = day.breaks(), "1 break" | "{n} breaks"))
-                    .child(tr!(
-                        "Longest stretch {time}",
-                        time = format_minutes(day.longest_secs().max(t.session_active()))
-                    ))
-                    .child(tr!("+{points} points today", points = day.points())),
-            )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(tr!(
-                "Scoring: a session scores full marks up to 110% of {work} minutes, and loses more the longer it runs past that. Being away from the computer for {rest} minutes counts as a break automatically.",
-                work = c.config.breaks.work_minutes,
-                rest = c.config.breaks.break_minutes
-            )));
-
-        v_flex().gap_4().child(status).child(score_card).into_any_element()
-    }
-
-    // ---- stats tab -----------------------------------------------------------
-
-    fn render_stats(&self, cx: &mut Context<Self>) -> AnyElement {
-        let c = self.controller.read(cx);
-        let theme = cx.theme();
-        let today = local_date(now_ts());
-        let today_score = c.today_score();
-        let streak = c.stats.streak(today, today_score);
-        let points = c.stats.total_points();
-        let (level, level_min, next) = stats::level(points);
-
+        // Three tiles rather than a line of text: the streak, the points and the
+        // title are what a glance at this page is for.
         let summary = h_flex()
             .gap_3()
             .child(stat_tile(
@@ -1406,7 +1517,10 @@ impl MainWindow {
             ))
             .child(Progress::new("level").value(level_progress));
 
-        // Last 7 days, oldest first.
+        // Last 7 days, oldest first. The bar's height and the number above it
+        // carry the score; the colour only has to say whether the day cleared
+        // the good line, which is the one comparison the number alone does not
+        // make at a glance.
         let bar_max = 120.0;
         let bars = h_flex()
             .gap_2()
@@ -1431,7 +1545,7 @@ impl MainWindow {
                             .text_color(theme.muted_foreground)
                             .child(score.map_or(String::new(), |s| s.to_string())),
                     )
-                    .child(skin(cx).status_bar(level_of(score), px(height), cx))
+                    .child(skin(cx).status_bar(bar_level(score), px(height), cx))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(if ago == 0 {
                         tr!("Today").to_string()
                     } else {
@@ -1439,8 +1553,65 @@ impl MainWindow {
                     }))
             }));
 
-        let empty = Default::default();
-        let day = c.stats.day(today).unwrap_or(&empty);
+        let score_card = card(cx)
+            .gap_3()
+            .child(section_label(tr!("Today's health score"), cx))
+            .child(
+                h_flex()
+                    .items_end()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(48.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(score_color(today_score, cx))
+                            .child(today_score.map_or("--".to_string(), |s| s.to_string())),
+                    )
+                    .child(div().pb_2().text_lg().child(
+                        today_score.map_or(tr!("Scoring starts after 15 minutes of use"), stats::grade),
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_4()
+                    .flex_wrap()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(tr!(
+                        "Screen time {time}",
+                        time = format_minutes(day.active_secs() + t.session_active())
+                    ))
+                    .child(tr!(n = day.breaks(), "1 break" | "{n} breaks"))
+                    .child(tr!(
+                        "Longest stretch {time}",
+                        time = format_minutes(day.longest_secs().max(t.session_active()))
+                    ))
+                    .child(tr!("+{points} points today", points = day.points())),
+            )
+            .child(skin(cx).band(cx))
+            .child(section_label(tr!("Health score, last 7 days"), cx))
+            .child(bars)
+            .child(
+                h_flex()
+                    .gap_4()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(legend_item(
+                        skin(cx).status_block(Level::Good, cx),
+                        &tr!("Good ({n}+)", n = GOOD_SCORE),
+                    ))
+                    .child(legend_item(
+                        skin(cx).status_block(Level::Fair, cx),
+                        &tr!("Below {n}", n = GOOD_SCORE),
+                    ))
+                    .child(legend_item(skin(cx).status_block(Level::Neutral, cx), tr!("No data"))),
+            )
+            .child(div().text_xs().text_color(theme.muted_foreground).child(tr!(
+                "Scoring: a session scores full marks up to 110% of {work} minutes, and loses more the longer it runs past that. Being away from the computer for {rest} minutes counts as a break automatically.",
+                work = c.config.breaks.work_minutes,
+                rest = c.config.breaks.break_minutes
+            )));
+
         let mut sessions = v_flex().gap_1();
         if day.sessions.is_empty() {
             sessions = sessions.child(
@@ -1488,75 +1659,124 @@ impl MainWindow {
                 ignored = day.ignored
             ))
         });
+        let sessions_card = card(cx)
+            .gap_1()
+            .child(section_label(tr!("Today's sessions"), cx))
+            .child(sessions)
+            .children(skips);
+
+        // The rhythm all of the above comes from, with the way to change it
+        // beside it: this page is about a schedule, and a schedule that cannot
+        // be adjusted from the page it is described on is a dead end.
+        let cadence = v_flex()
+            .gap_2()
+            .child(h_flex().gap_3().children(BREAK_FIELDS.map(|(_, label, _, get, _)| {
+                card(cx)
+                    .flex_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(translate(label)),
+                    )
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(skin(cx).weight(Voice::Loud))
+                            .child(tr!("{n} min", n = get(&c.config.breaks))),
+                    )
+            })))
+            .child(
+                h_flex().child(
+                    skin(cx)
+                        .button("adjust-breaks".into(), Tone::Ghost, Control::Small, cx)
+                        .label(tr!("Adjust in Settings"))
+                        .on_click(cx.listener(|this, _, _, cx| this.open_section(Section::Breaks, cx))),
+                ),
+            );
 
         v_flex()
             .gap_4()
+            .child(status)
             .child(summary)
             .child(level_card)
-            .child(
-                card(cx)
-                    .gap_2()
-                    .child(section_label(tr!("Health score, last 7 days"), cx))
-                    .child(bars),
-            )
-            .child(
-                card(cx)
-                    .gap_1()
-                    .child(section_label(tr!("Today's sessions"), cx))
-                    .child(sessions)
-                    .children(skips),
-            )
+            .child(score_card)
+            .child(sessions_card)
+            .child(cadence)
             .into_any_element()
     }
 
-    // ---- settings tab ----------------------------------------------------------
+    // ---- settings ----------------------------------------------------------
 
+    /// Goes to a settings section, wherever the request came from.
+    ///
+    /// The links that point at one — "name them on the Settings tab", "adjust in
+    /// Settings" — have to land on the section they mean. Dropping the user at
+    /// the top of a page of five sections and leaving them to find it is the
+    /// problem the sections exist to solve.
+    fn open_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.cancel_recording(cx);
+        self.tab = Tab::Settings;
+        self.section = section;
+        cx.notify();
+    }
+
+    /// A list of sections down the left, the chosen one on the right.
+    ///
+    /// Every setting used to be one column, which put the two or three rows a
+    /// user came for somewhere in the middle of a page of everything.
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let nav = v_flex()
+            .w(px(112.))
+            .flex_none()
+            .gap_1()
+            .children(SECTIONS.map(|section| {
+                // The chosen section is the filled one. `Secondary` rather than
+                // `Accent`: a nav is a place you are, not the one thing to click.
+                skin(cx)
+                    .button(
+                        SharedString::from(format!("section-{}", section.key())),
+                        if section == self.section {
+                            Tone::Secondary
+                        } else {
+                            Tone::Ghost
+                        },
+                        Control::Small,
+                        cx,
+                    )
+                    .label(skin(cx).case(section.label()))
+                    .w_full()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cancel_recording(cx);
+                        this.section = section;
+                        cx.notify();
+                    }))
+            }));
+
+        let panel: AnyElement = match self.section {
+            Section::General => self.render_general_settings(cx),
+            Section::Breaks => self.render_break_settings(cx),
+            Section::Displays => self.render_display_settings(cx),
+            Section::Hotkeys => self.render_hotkey_settings(cx),
+            Section::Advanced => self.render_advanced_settings(cx),
+        };
+
+        h_flex()
+            .gap_5()
+            .items_start()
+            .child(nav)
+            .child(v_flex().flex_1().min_w_0().child(panel))
+            .into_any_element()
+    }
+
+    fn render_general_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let c = self.controller.read(cx);
         let theme = cx.theme();
-        let b = c.config.breaks.clone();
 
-        let toggle_row = |id: &'static str,
-                          label: &'static str,
-                          desc: &'static str,
-                          checked: bool,
-                          f: fn(&mut Controller, bool, &mut Context<Controller>)| {
-            let controller = self.controller.clone();
-            h_flex()
-                .justify_between()
-                .gap_4()
-                .child(
-                    v_flex()
-                        .child(label)
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(desc)),
-                )
-                .child(Switch::new(id).checked(checked).on_click(move |v, _, cx| {
-                    let v = *v;
-                    controller.update(cx, |c, cx| f(c, v, cx));
-                }))
-        };
-
-        let duration_row = |(key, label, ..): BreakField| {
-            h_flex()
-                .justify_between()
-                .items_center()
-                .child(translate(label))
-                .children(self.numbers.get(key).map(|f| {
-                    div().w(px(148.)).child(
-                        f.input().suffix(
-                            div()
-                                .pr_1()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(tr!("min")),
-                        ),
-                    )
-                }))
-        };
-
-        // Three small buttons rather than a dropdown: every option is visible at
-        // a glance, and this is the same primary/outline pair idiom the monitor
-        // input pickers use.
+        // Small buttons rather than a dropdown: every option is visible at a
+        // glance, and this is the same filled/ghost pair idiom the monitor input
+        // pickers use.
         let skin_picker = || {
             let controller = self.controller.clone();
             let current = c.config.skin;
@@ -1694,156 +1914,292 @@ impl MainWindow {
             )
             .child(language_picker());
 
-        let general = card(cx)
+        card(cx)
             .gap_4()
-            .child(section_label(tr!("General"), cx))
+            .child(section_label(tr!("General & appearance"), cx))
             .child(skin_row)
             .child(appearance_row)
             .child(language_row)
             .child(toggle_row(
+                &self.controller,
                 "autostart",
                 tr!("Start automatically at login"),
                 tr!("Runs quietly in the tray after you sign in to Windows"),
                 c.autostart,
                 |c, v, cx| c.set_autostart(v, cx),
+                cx,
             ))
-            .child(toggle_row(
-                "developer-mode",
-                tr!("Developer mode"),
-                tr!("Shows DDC/CI diagnostics and command tracing on the Monitors tab, and logs every command"),
-                c.config.developer_mode,
-                |c, v, cx| c.set_developer_mode(v, cx),
-            ));
+            .into_any_element()
+    }
 
-        let breaks = card(cx)
+    fn render_break_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = self.controller.read(cx);
+        let theme = cx.theme();
+        let b = c.config.breaks.clone();
+
+        let duration_row = |(key, label, ..): BreakField| {
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(translate(label))
+                .children(self.numbers.get(key).map(|f| {
+                    div().w(px(148.)).child(
+                        f.input().suffix(
+                            div()
+                                .pr_1()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(tr!("min")),
+                        ),
+                    )
+                }))
+        };
+
+        card(cx)
             .gap_4()
             .child(section_label(tr!("Break reminders"), cx))
             .child(toggle_row(
+                &self.controller,
                 "breaks-enabled",
                 tr!("Turn on break reminders"),
                 tr!("When the time is up, a full-screen reminder fades in; stepping away counts as a break automatically"),
                 b.enabled,
                 |c, v, cx| c.update_config(cx, |cfg| cfg.breaks.enabled = v),
+                cx,
             ))
             .child(toggle_row(
+                &self.controller,
                 "fullscreen",
                 tr!("Stay quiet in fullscreen / presentations"),
                 tr!("Holds reminders while you are gaming, watching video, or presenting"),
                 b.respect_fullscreen,
                 |c, v, cx| c.update_config(cx, |cfg| cfg.breaks.respect_fullscreen = v),
-            ))
-            .children(BREAK_FIELDS.map(duration_row));
-
-        let hotkeys = &c.config.hotkeys;
-        let hk = |label: &'static str, value: &str| {
-            h_flex()
-                .justify_between()
-                .text_sm()
-                .child(label)
-                .child(div().text_color(theme.muted_foreground).child(if value.is_empty() {
-                    tr!("Not set").to_string()
-                } else {
-                    value.to_string()
-                }))
-        };
-        // Moving the setup to another computer is a whole-app action, not a
-        // per-monitor one, so it lives here rather than inside a monitor card.
-        let switching_card = {
-            let export = self.controller.clone();
-            let import = self.controller.clone();
-            card(cx)
-                .gap_4()
-                .child(section_label(tr!("Monitor inputs"), cx))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    tr!("List the computers sharing each monitor and give them names — the names are the only thing that lets you tell them apart at a glance. Click the dot on the left to mark the one you are sitting at; it only affects what is shown, never switching."),
-                ))
-                .when(c.monitors.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .font_weight(skin(cx).weight(Voice::Quiet))
-                            .text_color(theme.muted_foreground)
-                            .child(tr!("No external monitors that support DDC/CI have been detected yet.")),
-                    )
-                })
-                .children(
-                    c.monitors
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, m)| self.render_input_settings(idx, m, c, cx)),
-                )
-                .child(skin(cx).band(cx))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(
-                    tr!("The port-to-name mapping lives on the monitor, so it holds whichever computer you fill it in on. Set it up once and move it to the rest, and you never type it in again."),
-                ))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            skin(cx).button("export-switching".into(), Tone::Outline, Control::Small, cx)
-                                .icon(Icon::new(Lucide::Copy))
-                                .label(tr!("Copy settings"))
-                                .on_click(move |_, _, cx| {
-                                    let text = export.read(cx).export_switching();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                    export.update(cx, |c, cx| {
-                                        c.notice =
-                                            Some(tr!("Copied. Click \"Import settings\" on the other computer.").into());
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(
-                            skin(cx).button("import-switching".into(), Tone::Outline, Control::Small, cx)
-                                .label(tr!("Import settings"))
-                                .on_click(move |_, _, cx| {
-                                    let text = cx
-                                        .read_from_clipboard()
-                                        .and_then(|item| item.text())
-                                        .unwrap_or_default();
-                                    import.update(cx, |c, cx| {
-                                        c.import_switching(&text, cx);
-                                    });
-                                }),
-                        ),
-                )
-        };
-
-        let hotkey_card = card(cx)
-            .gap_2()
-            .child(section_label(
-                tr!("Global hotkeys (restart after editing the config file)"),
                 cx,
             ))
-            .child(hk(tr!("Switch monitor input"), &hotkeys.toggle_input))
-            .child(hk(tr!("Brightness up"), &hotkeys.brightness_up))
-            .child(hk(tr!("Brightness down"), &hotkeys.brightness_down))
-            .child(hk(tr!("Take a break now"), &hotkeys.break_now))
-            .children(c.hotkey_errors.iter().map(|e| {
-                div()
-                    .text_xs()
-                    .text_color(skin(cx).status_text(Level::Poor, cx))
-                    .child(tr!("Registration failed: {e}", e = e))
-            }))
-            .child(
-                h_flex().pt_2().child(
-                    skin(cx)
-                        .button("open-config".into(), Tone::Outline, Control::Small, cx)
-                        .label(tr!("Open config folder"))
-                        .on_click(|_, _, cx| {
-                            let dir = config::data_dir();
-                            let _ = std::fs::create_dir_all(&dir);
-                            cx.reveal_path(&config::config_path().exists().then(config::config_path).unwrap_or(dir));
-                        }),
-                ),
-            );
+            .children(BREAK_FIELDS.map(duration_row))
+            .into_any_element()
+    }
+
+    fn render_display_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = self.controller.read(cx);
+        let theme = cx.theme();
+        let export = self.controller.clone();
+        let import = self.controller.clone();
 
         v_flex()
             .gap_4()
-            .child(general)
-            .child(breaks)
-            .child(switching_card)
-            .child(hotkey_card)
+            .child(
+                card(cx)
+                    .gap_2()
+                    .child(section_label(tr!("Monitor inputs"), cx))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        tr!("List the computers sharing each monitor and give them names — the names are the only thing that lets you tell them apart at a glance. Click the dot on the left to mark the one you are sitting at; it only affects what is shown, never switching."),
+                    )),
+            )
+            .when(c.monitors.is_empty(), |el| {
+                el.child(card(cx).child(
+                    div()
+                        .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
+                        .text_color(theme.muted_foreground)
+                        .child(tr!("No external monitors that support DDC/CI have been detected yet.")),
+                ))
+            })
+            .children(
+                c.monitors
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, m)| self.render_input_settings(idx, m, c, cx)),
+            )
+            .child(
+                card(cx)
+                    .gap_3()
+                    .child(section_label(tr!("Move these settings to another computer"), cx))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(
+                        tr!("The port-to-name mapping lives on the monitor, so it holds whichever computer you fill it in on. Set it up once and move it to the rest, and you never type it in again."),
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                skin(cx)
+                                    .button("export-switching".into(), Tone::Outline, Control::Small, cx)
+                                    .icon(Icon::new(Lucide::Copy))
+                                    .label(tr!("Copy settings"))
+                                    .on_click(move |_, _, cx| {
+                                        let text = export.read(cx).export_switching();
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        export.update(cx, |c, cx| {
+                                            c.notice = Some(
+                                                tr!("Copied. Click \"Import settings\" on the other computer.").into(),
+                                            );
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                            .child(
+                                skin(cx)
+                                    .button("import-switching".into(), Tone::Outline, Control::Small, cx)
+                                    .label(tr!("Import settings"))
+                                    .on_click(move |_, _, cx| {
+                                        let text = cx
+                                            .read_from_clipboard()
+                                            .and_then(|item| item.text())
+                                            .unwrap_or_default();
+                                        import.update(cx, |c, cx| {
+                                            c.import_switching(&text, cx);
+                                        });
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The global hotkeys, each one recorded where it is listed.
+    ///
+    /// These used to be read-only rows telling the user to edit the config file
+    /// and restart, which for a row of four strings is a poor trade. Recording
+    /// writes the config and re-registers in the same breath, so what is on
+    /// screen is what the keyboard does.
+    fn render_hotkey_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = self.controller.read(cx);
+        let theme = cx.theme();
+
+        let rows = config::HOTKEY_FIELDS.map(|field| {
+            let spec = (field.get)(&c.config.hotkeys).to_string();
+            let key = field.key;
+            let armed = self.recording == Some(key);
+            h_flex()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .child(div().child(translate(field.label)))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .when(armed, |el| {
+                            el.child(skin(cx).chip(tr!("Press a combination…"), Tone::Accent, cx))
+                        })
+                        .when(!armed, |el| {
+                            if spec.is_empty() {
+                                el.child(skin(cx).chip(tr!("Not set"), Tone::Outline, cx))
+                            } else {
+                                el.child(hotkey_caps(&spec, cx))
+                            }
+                        })
+                        .when(!armed, |el| {
+                            el.child(
+                                skin(cx)
+                                    .button(
+                                        SharedString::from(format!("record-{key}")),
+                                        Tone::Outline,
+                                        Control::Tiny,
+                                        cx,
+                                    )
+                                    .label(tr!("Record"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_recording(key, window, cx);
+                                    })),
+                            )
+                        })
+                        .when(armed, |el| {
+                            el.child(
+                                skin(cx)
+                                    .button(
+                                        SharedString::from(format!("cancel-{key}")),
+                                        Tone::Ghost,
+                                        Control::Tiny,
+                                        cx,
+                                    )
+                                    .label(tr!("Cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_recording(cx);
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .when(!armed && !spec.is_empty(), |el| {
+                            el.child(
+                                skin(cx)
+                                    .button(
+                                        SharedString::from(format!("clear-{key}")),
+                                        Tone::Ghost,
+                                        Control::Tiny,
+                                        cx,
+                                    )
+                                    .label("✕")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.controller.update(cx, |c, cx| c.set_hotkey(key, String::new(), cx));
+                                    })),
+                            )
+                        }),
+                )
+        });
+
+        v_flex()
+            .id("hotkeys")
+            // The panel the keystroke lands on. Kept in the tree whether or not
+            // a combination is being recorded, so the focus handle has somewhere
+            // to sit the moment recording starts.
+            .track_focus(&self.hotkey_focus)
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.capture_hotkey(event, cx)),
+            )
+            .gap_3()
+            .child(
+                card(cx)
+                    .gap_3()
+                    .child(section_label(tr!("Hotkeys"), cx))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(tr!(
+                        "Click Record and press the combination you want. It takes effect straight away — there is no config file to edit and no restart."
+                    )))
+                    .children(rows)
+                    .children(c.hotkey_errors.iter().map(|e| {
+                        div()
+                            .text_xs()
+                            .text_color(skin(cx).status_text(Level::Poor, cx))
+                            .child(tr!("Registration failed: {e}", e = e))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_advanced_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let c = self.controller.read(cx);
+        let theme = cx.theme();
+
+        card(cx)
+            .gap_4()
+            .child(section_label(tr!("Advanced"), cx))
+            .child(toggle_row(
+                &self.controller,
+                "developer-mode",
+                tr!("Developer mode"),
+                tr!("Shows DDC/CI diagnostics and command tracing on the Monitors tab, and logs every command"),
+                c.config.developer_mode,
+                |c, v, cx| c.set_developer_mode(v, cx),
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(tr!("Open config folder"))
+                    .child(
+                        skin(cx)
+                            .button("open-config".into(), Tone::Outline, Control::Small, cx)
+                            .label(tr!("Open"))
+                            .on_click(|_, _, cx| {
+                                let dir = config::data_dir();
+                                let _ = std::fs::create_dir_all(&dir);
+                                cx.reveal_path(
+                                    &config::config_path().exists().then(config::config_path).unwrap_or(dir),
+                                );
+                            }),
+                    ),
+            )
             .child(
                 div()
                     .text_xs()
@@ -1853,24 +2209,67 @@ impl MainWindow {
             )
             .into_any_element()
     }
+
+    // ---- recording a hotkey -------------------------------------------------
+
+    /// Starts waiting for a combination for one hotkey.
+    fn start_recording(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        // The bindings are released while recording lasts: the user is about to
+        // press the keys they want, and if the combination is already bound the
+        // screen would switch input in the middle of being asked which keys
+        // should switch input.
+        self.controller.update(cx, |c, cx| c.hold_hotkeys(true, cx));
+        self.recording = Some(key);
+        window.focus(&self.hotkey_focus, cx);
+        cx.notify();
+    }
+
+    /// Stops waiting, and hands the global hotkeys back.
+    fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
+            self.controller.update(cx, |c, cx| c.hold_hotkeys(false, cx));
+        }
+    }
+
+    /// Takes the combination that was just pressed, or gives up on Escape.
+    fn capture_hotkey(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(field) = self.recording else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.key == "escape" {
+            self.recording = None;
+            self.controller.update(cx, |c, cx| c.hold_hotkeys(false, cx));
+            cx.notify();
+            return;
+        }
+        // `None` means a modifier pressed on its own, which is not a combination
+        // yet: recording is waiting for the key it will be held down with.
+        let Some(spec) = hotkey_spec(keystroke) else {
+            return;
+        };
+        self.recording = None;
+        // Writing the config re-registers everything, which also hands the keys
+        // back — there is no need to release the hold separately.
+        self.controller.update(cx, |c, cx| c.set_hotkey(field, spec, cx));
+        cx.notify();
+    }
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tab_index = TABS.iter().position(|t| *t == self.tab).unwrap_or(0);
         // One page frame for every tab: the skin's title treatment, then the
         // band. Before this, each tab started wherever its first card happened
         // to, which gave the style nowhere to put its display type.
         let page_title = match self.tab {
             Tab::Monitors => tr!("Monitors"),
-            Tab::Breaks => tr!("Breaks"),
-            Tab::Stats => tr!("Stats"),
+            Tab::Breaks => tr!("Breaks & stats"),
             Tab::Settings => tr!("Settings"),
         };
         let body = match self.tab {
             Tab::Monitors => self.render_monitors(cx),
             Tab::Breaks => self.render_breaks(cx),
-            Tab::Stats => self.render_stats(cx),
             Tab::Settings => self.render_settings(cx),
         };
         let notice = self.controller.read(cx).notice.clone();
@@ -1884,19 +2283,28 @@ impl Render for MainWindow {
         let tabs = TabBar::new("tabs")
             .segmented()
             .small()
+            .flex_none()
             .selected_index(tab_index)
             .child(skin(cx).case(tr!("Monitors")))
-            .child(skin(cx).case(tr!("Breaks")))
-            .child(skin(cx).case(tr!("Stats")))
+            .child(skin(cx).case(tr!("Breaks & stats")))
             .child(skin(cx).case(tr!("Settings")))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                // Leaving the tab is leaving the recorder, if one was open.
+                this.cancel_recording(cx);
                 this.tab = TABS[*ix];
                 cx.notify();
             }));
 
-        // Self-drawn title bar: brand on the left, tabs in the drag area, native
+        // Self-drawn title bar: brand on the left, tabs in the middle, native
         // min/max/close hit-testing (snap layouts keep working) on the right.
         // The skin's title-bar colours are the band this sits on.
+        //
+        // The strip is centred on the window rather than on the space left over,
+        // which is what the brand and the trailing spacer being equal arms buys.
+        // The caption buttons are drawn outside this row, so their width is
+        // added back on the left — without it the strip sits half of them to the
+        // left of centre, which is exactly the kind of near-miss the eye reads
+        // as a mistake.
         let title_bar = TitleBar::new()
             .h(px(46.))
             .pl_4()
@@ -1904,6 +2312,8 @@ impl Render for MainWindow {
             .border_color(theme.title_bar_border)
             .child(
                 h_flex()
+                    .flex_1()
+                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .child(img(brand_icon()).size(px(22.)))
@@ -1914,7 +2324,9 @@ impl Render for MainWindow {
                             .child(skin(cx).case("tarsier")),
                     ),
             )
-            .child(div().pr_2().child(tabs));
+            .child(div().w(caption_buttons_width(window)).flex_none())
+            .child(tabs)
+            .child(div().flex_1());
 
         v_flex()
             .size_full()
@@ -2022,6 +2434,196 @@ fn section_label(text: &'static str, cx: &App) -> AnyElement {
     skin(cx).section_label(text, cx)
 }
 
+/// One settings row: what it is, what it does, and a switch.
+///
+/// A free function rather than a closure per section, because three sections
+/// draw rows that differ only in their words.
+fn toggle_row(
+    controller: &Entity<Controller>,
+    id: &'static str,
+    label: &'static str,
+    desc: &'static str,
+    checked: bool,
+    apply: fn(&mut Controller, bool, &mut Context<Controller>),
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let controller = controller.clone();
+    h_flex()
+        .justify_between()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(label)
+                .child(div().text_xs().text_color(theme.muted_foreground).child(desc)),
+        )
+        .child(Switch::new(id).checked(checked).on_click(move |v, _, cx| {
+            let v = *v;
+            controller.update(cx, |c, cx| apply(c, v, cx));
+        }))
+        .into_any_element()
+}
+
+/// A colour swatch and what it means, so a chart can be read without relying on
+/// colour alone.
+fn legend_item(color: Hsla, label: &str) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(div().size(px(8.)).rounded_sm().bg(color))
+        .child(label.to_string())
+        .into_any_element()
+}
+
+/// The level a chart bar reads as.
+///
+/// Two steps rather than the four a score can be spoken in: on a chart whose
+/// bars carry their own number and height, the colour's one job is to say
+/// whether the day cleared the good line — and a legend that has to explain four
+/// colours explains none of them.
+fn bar_level(score: Option<u8>) -> Level {
+    match score {
+        Some(s) if s >= GOOD_SCORE => Level::Good,
+        Some(_) => Level::Fair,
+        None => Level::Neutral,
+    }
+}
+
+/// How much of the title bar the native caption buttons take.
+///
+/// [`TitleBar`] draws them outside the row its children live in, so the row's
+/// own centre sits half of them to the left of the window's. The caller adds
+/// this width back on the other side to put the tab strip back on the centre
+/// line; the height constant is the one the buttons are drawn at, in the same
+/// library, so the two cannot drift apart.
+///
+/// Nothing is drawn on the right on macOS, where the traffic lights live on the
+/// left, and none of it is ours under server-side decorations.
+fn caption_buttons_width(window: &Window) -> Pixels {
+    if cfg!(not(windows)) {
+        return px(0.);
+    }
+    let supported = window.window_controls();
+    let buttons = 1 + usize::from(supported.minimize) + usize::from(supported.maximize);
+    TITLE_BAR_HEIGHT * buttons as f32
+}
+
+/// A GPUI keystroke as a `global-hotkey` spec, or `None` for a press that
+/// cannot be part of a combination — a modifier on its own.
+///
+/// The two libraries name keys differently, and Windows adds a trap of its own:
+/// for the digit row and the punctuation keys, GPUI reports the *shifted*
+/// character and clears the shift flag, so Shift+1 arrives as `"!"` with
+/// `shift == false`. A spec built from that would be the bare `!`, which
+/// `global-hotkey` has never heard of — so the symbol is turned back into the
+/// key it is printed on, and the shift is put back where it belongs.
+fn hotkey_spec(keystroke: &Keystroke) -> Option<String> {
+    let (key, shifted) = spec_key(&keystroke.key)?;
+    let m = &keystroke.modifiers;
+    let mut spec = String::new();
+    for (held, name) in [
+        (m.control, "ctrl"),
+        (m.alt, "alt"),
+        (m.shift || shifted, "shift"),
+        // GPUI calls it `platform` — the Windows key here, and `super` is the
+        // only name for it that `global-hotkey` parses.
+        (m.platform, "super"),
+    ] {
+        if held {
+            spec.push_str(name);
+            spec.push('+');
+        }
+    }
+    spec.push_str(&key);
+    Some(spec)
+}
+
+/// The `global-hotkey` name for a key GPUI reported, and whether the character
+/// carries a shift of its own.
+fn spec_key(key: &str) -> Option<(String, bool)> {
+    // A modifier on its own is not a combination yet: recording is waiting for
+    // the key it will be held down with.
+    if matches!(
+        key,
+        "" | "control" | "alt" | "shift" | "platform" | "function" | "capslock"
+    ) {
+        return None;
+    }
+    // Named keys, spelled as the Windows backend spells them.
+    let named = match key {
+        "space" => "Space",
+        "tab" => "Tab",
+        "enter" => "Enter",
+        "escape" => "Escape",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "insert" => "Insert",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        "up" => "Up",
+        "down" => "Down",
+        "left" => "Left",
+        "right" => "Right",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return Some((named.to_string(), false));
+    }
+    if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
+        && (1..=24).contains(&n)
+    {
+        return Some((format!("F{n}"), false));
+    }
+    // A single printed character. Letters, digits and the unshifted symbols are
+    // their own name — the parser is case-insensitive — and the shifted ones are
+    // folded back onto the key they share.
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let (name, shifted) = match c {
+        'a'..='z' | 'A'..='Z' => (c.to_ascii_uppercase().to_string(), false),
+        '0'..='9' => (c.to_string(), false),
+        '!' => ("1".to_string(), true),
+        '@' => ("2".to_string(), true),
+        '#' => ("3".to_string(), true),
+        '$' => ("4".to_string(), true),
+        '%' => ("5".to_string(), true),
+        '^' => ("6".to_string(), true),
+        '&' => ("7".to_string(), true),
+        '*' => ("8".to_string(), true),
+        '(' => ("9".to_string(), true),
+        ')' => ("0".to_string(), true),
+        '`' => ("`".to_string(), false),
+        '~' => ("`".to_string(), true),
+        '-' => ("-".to_string(), false),
+        '_' => ("-".to_string(), true),
+        '=' => ("=".to_string(), false),
+        '+' => ("=".to_string(), true),
+        '[' => ("[".to_string(), false),
+        '{' => ("[".to_string(), true),
+        ']' => ("]".to_string(), false),
+        '}' => ("]".to_string(), true),
+        '\\' => ("\\".to_string(), false),
+        '|' => ("\\".to_string(), true),
+        ';' => (";".to_string(), false),
+        ':' => (";".to_string(), true),
+        '\'' => ("'".to_string(), false),
+        '"' => ("'".to_string(), true),
+        ',' => (",".to_string(), false),
+        '<' => (",".to_string(), true),
+        '.' => (".".to_string(), false),
+        '>' => (".".to_string(), true),
+        '/' => ("/".to_string(), false),
+        '?' => ("/".to_string(), true),
+        _ => return None,
+    };
+    Some((name, shifted))
+}
+
 /// The status a score reads as, before the skin decides how to say it.
 fn level_of(score: Option<u8>) -> Level {
     match score {
@@ -2075,7 +2677,156 @@ fn score_color(score: Option<u8>, cx: &App) -> Hsla {
 mod tests {
     // Deliberately not `use super::*`: that would pull in GPUI's own `test`
     // attribute macro, which shadows the built-in one and recurses.
-    use super::{Setup, wizard_seed};
+    use std::str::FromStr as _;
+
+    use global_hotkey::hotkey::HotKey;
+    use gpui_kit::{Keystroke, Modifiers};
+
+    use super::{Setup, hotkey_spec, wizard_seed};
+
+    fn pressed(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: key.to_string(),
+            key_char: None,
+        }
+    }
+
+    fn ctrl_alt() -> Modifiers {
+        Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_recorded_combination_is_one_the_hotkey_manager_can_parse() {
+        // The recorder writes the spec and `global-hotkey` reads it, and the two
+        // spell keys differently. A name only one of them knows is a combination
+        // the Settings tab accepts and Windows then refuses, with the failure
+        // arriving as a raw parser message under the row.
+        let keys = [
+            "i",
+            "a",
+            "z",
+            "1",
+            "9",
+            "f1",
+            "f12",
+            "f24",
+            "pageup",
+            "pagedown",
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "insert",
+            "delete",
+            "backspace",
+            "enter",
+            "tab",
+            "space",
+            "escape",
+            "`",
+            "-",
+            "=",
+            "[",
+            "]",
+            "\\",
+            ";",
+            "'",
+            ",",
+            ".",
+            "/",
+            "!",
+            "@",
+            "#",
+            "$",
+            "%",
+            "^",
+            "&",
+            "*",
+            "(",
+            ")",
+            "~",
+            "_",
+            "+",
+            "{",
+            "}",
+            "|",
+            ":",
+            "\"",
+            "<",
+            ">",
+            "?",
+        ];
+        let modifiers = [
+            Modifiers::none(),
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            ctrl_alt(),
+            Modifiers {
+                control: true,
+                alt: true,
+                shift: true,
+                platform: true,
+                function: false,
+            },
+        ];
+        for key in keys {
+            for modifiers in modifiers {
+                let spec = hotkey_spec(&pressed(key, modifiers)).unwrap_or_else(|| panic!("{key} produced no spec"));
+                assert!(
+                    HotKey::from_str(&spec).is_ok(),
+                    "{key} recorded as {spec:?}, which global-hotkey cannot parse"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_shifted_symbol_is_written_as_the_key_it_is_printed_on() {
+        // Windows folds the shift into the character for the digit row and for
+        // the punctuation keys, and clears the flag: Shift+1 arrives as "!" with
+        // no shift on it. Written down as it arrives, that is the bare "!", which
+        // global-hotkey has never heard of.
+        assert_eq!(hotkey_spec(&pressed("!", Modifiers::none())).unwrap(), "shift+1");
+        assert_eq!(hotkey_spec(&pressed("$", Modifiers::none())).unwrap(), "shift+4");
+        assert_eq!(hotkey_spec(&pressed("_", Modifiers::none())).unwrap(), "shift+-");
+        // A letter keeps its own shift flag, and a digit keeps its own key.
+        assert_eq!(hotkey_spec(&pressed("i", Modifiers::shift())).unwrap(), "shift+I");
+        assert_eq!(hotkey_spec(&pressed("7", Modifiers::none())).unwrap(), "7");
+        // The Windows key, spelled the one way the parser knows.
+        assert_eq!(
+            hotkey_spec(&pressed(
+                "i",
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                }
+            ))
+            .unwrap(),
+            "super+I"
+        );
+        assert_eq!(hotkey_spec(&pressed("pageup", ctrl_alt())).unwrap(), "ctrl+alt+PageUp");
+    }
+
+    #[test]
+    fn a_modifier_on_its_own_is_not_a_combination_yet() {
+        // Recording waits for the key the modifiers are held down with: ending
+        // on Ctrl would bind "Ctrl" and swallow the rest of what was pressed.
+        for key in ["", "control", "alt", "shift", "platform", "function", "capslock"] {
+            assert!(hotkey_spec(&pressed(key, ctrl_alt())).is_none(), "{key:?} was taken");
+        }
+        // A name neither library shares is refused rather than written down as a
+        // hotkey nothing can register.
+        assert!(hotkey_spec(&pressed("intlbackslash", ctrl_alt())).is_none());
+    }
 
     #[test]
     fn a_two_input_monitor_opens_on_naming_not_on_picking() {

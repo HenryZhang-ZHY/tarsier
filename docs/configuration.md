@@ -2,7 +2,7 @@
 
 **English** · [简体中文](configuration.zh.md) · [Back to README](../README.md)
 
-"Open config folder" on the Settings tab points at `%APPDATA%\tarsier\`:
+"Open config folder" on **Settings → Advanced** points at `%APPDATA%\tarsier\`:
 
 | File | Contents |
 | --- | --- |
@@ -10,13 +10,13 @@
 | `stats.json` | Per-day work session records |
 | `tarsier.log` | Log file |
 
-Anything you can change in the UI is written back to `config.json`. The fields below can **only** be edited by hand; restart for changes to take effect. The file is JSON, missing fields fall back to defaults, and a malformed file is ignored with a warning in the log.
+Anything you can change in the UI is written back to `config.json`. Everything below can also be edited by hand; the fields that have no UI are marked, and those need a restart to take effect. The file is JSON, missing fields fall back to defaults, and a malformed file is ignored with a warning in the log.
 
 ## Top-level fields
 
 ### `hotkeys`
 
-Hotkeys in `global-hotkey` syntax; an empty string disables one.
+Hotkeys in `global-hotkey` syntax; an empty string disables one. These are the four rows under **Settings → Hotkeys**, and recording one there is the usual way to set it: the change is registered immediately, with no restart.
 
 ```json
 {
@@ -29,11 +29,11 @@ Hotkeys in `global-hotkey` syntax; an empty string disables one.
 }
 ```
 
-Forms like `"ctrl+alt+I"` or `"ctrl+shift+F12"`. A registration failure shows its reason on the Settings tab.
+Forms like `"ctrl+alt+I"` or `"ctrl+shift+F12"`. One combination does one thing: recording one that another row already holds clears the other row, because Windows refuses a combination that is already registered — including by tarsier itself. A registration failure shows its reason under the rows.
 
 ### `brightness_step`
 
-How much brightness a hotkey press changes, in percent. Defaults to `10`.
+How much brightness a hotkey press changes, in percent. Defaults to `10`. **No UI** — edit the file and restart.
 
 ### `developer_mode`
 

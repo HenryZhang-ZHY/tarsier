@@ -12,6 +12,8 @@ mod stats;
 mod tray;
 mod ui;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -20,7 +22,7 @@ use gpui_kit::*;
 
 use crate::controller::Controller;
 use crate::platform::Instance;
-use crate::tray::{Command, Hotkey, Tray};
+use crate::tray::{Command, HotkeyRegistry, Tray};
 
 fn main() {
     // The elevated helper does one DDC/CI write and exits; it must not
@@ -59,11 +61,23 @@ fn main() {
         };
         controller::apply_theme(saved_skin, saved_theme, cx);
         let tray = Tray::new().inspect_err(|e| log::error!("tray icon: {e}")).ok();
-        let hotkey = Hotkey::new(&controller.read(cx).config.hotkeys)
+        // Shared with the controller, which re-registers these in place when a
+        // combination is recorded on the Settings tab. A hotkey manager owns a
+        // hidden window, and Windows only delivers to the thread that made it,
+        // so the registry stays on this one and is only ever borrowed briefly.
+        let hotkeys = HotkeyRegistry::new()
             .inspect_err(|e| log::error!("hotkeys: {e}"))
-            .ok();
+            .ok()
+            .map(|mut registry| {
+                registry.apply(&controller.read(cx).config.hotkeys);
+                Rc::new(RefCell::new(registry))
+            });
         controller.update(cx, |c, _| {
-            c.hotkey_errors = hotkey.as_ref().map(|h| h.errors.clone()).unwrap_or_default();
+            c.hotkey_errors = hotkeys
+                .as_ref()
+                .map(|registry| registry.borrow().errors().to_vec())
+                .unwrap_or_default();
+            c.hotkeys = hotkeys.clone();
         });
 
         // Without a tray icon the window is the only way in, so always show it.
@@ -79,8 +93,8 @@ fn main() {
                 if let Some(tray) = &tray {
                     commands.extend(tray.poll());
                 }
-                if let Some(hotkey) = &hotkey {
-                    commands.extend(hotkey.poll());
+                if let Some(hotkeys) = &hotkeys {
+                    commands.extend(hotkeys.borrow().poll());
                 }
                 while activate_rx.try_recv().is_ok() {
                     commands.push(Command::ShowWindow);

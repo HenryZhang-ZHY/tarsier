@@ -2,7 +2,7 @@
 
 **English** · [简体中文](developer-mode.zh.md) · [Back to README](../README.md)
 
-Turn it on from the Settings tab, or set `developer_mode` to `true` in `config.json`.
+Turn it on under **Settings → Advanced**, or set `developer_mode` to `true` in `config.json`.
 
 Once enabled:
 

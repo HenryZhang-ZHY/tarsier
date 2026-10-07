@@ -165,6 +165,77 @@ impl Default for Hotkeys {
     }
 }
 
+/// One global hotkey, as everything outside the hotkey manager sees it: where it
+/// lives in the config, and how to read and write it.
+///
+/// One table rather than four near-identical rows in two files: the Settings tab
+/// lists it, the registration loop walks it, and the "one combination does one
+/// thing" rule below uses it. A fifth hotkey is an entry here and its command in
+/// `tray`, which is the one thing this table deliberately does not know — a
+/// command belongs to the tray, and the config knows nothing about the tray.
+pub struct HotkeyField {
+    /// The field's name in `config.json`, and the identity the Settings tab
+    /// holds on to while it waits for a combination to be pressed.
+    pub key: &'static str,
+    /// English source text for the row; translated where it is drawn.
+    pub label: &'static str,
+    pub get: fn(&Hotkeys) -> &str,
+    pub set: fn(&mut Hotkeys, String),
+}
+
+pub const HOTKEY_FIELDS: [HotkeyField; 4] = [
+    HotkeyField {
+        key: "toggle_input",
+        label: "Switch monitor input",
+        get: |h| &h.toggle_input,
+        set: |h, v| h.toggle_input = v,
+    },
+    HotkeyField {
+        key: "brightness_up",
+        label: "Brightness up",
+        get: |h| &h.brightness_up,
+        set: |h, v| h.brightness_up = v,
+    },
+    HotkeyField {
+        key: "brightness_down",
+        label: "Brightness down",
+        get: |h| &h.brightness_down,
+        set: |h, v| h.brightness_down = v,
+    },
+    HotkeyField {
+        key: "break_now",
+        label: "Take a break now",
+        get: |h| &h.break_now,
+        set: |h, v| h.break_now = v,
+    },
+];
+
+impl Hotkeys {
+    /// Gives `key` the combination `spec`, and takes that combination away from
+    /// every other hotkey.
+    ///
+    /// A combination can only do one thing. Left on two fields, the second
+    /// registration is refused by Windows and reported as a failure the user
+    /// cannot act on — so the older binding is dropped instead, and the row it
+    /// was on says "not set" a moment later.
+    pub fn set_spec(&mut self, key: &'static str, spec: String) {
+        let spec = spec.trim().to_string();
+        for field in HOTKEY_FIELDS {
+            if field.key == key {
+                (field.set)(self, spec.clone());
+            }
+        }
+        if spec.is_empty() {
+            return;
+        }
+        for field in HOTKEY_FIELDS {
+            if field.key != key && (field.get)(self).trim().eq_ignore_ascii_case(&spec) {
+                (field.set)(self, String::new());
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MonitorPrefs {
@@ -299,6 +370,40 @@ pub fn save<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_hotkey_field_reads_and_writes_its_own_key() {
+        // The table is a set of function pointers, so a copy-paste that pointed
+        // two rows at one field would show up as one hotkey silently editing
+        // another — and would register the wrong one under the right label.
+        let mut keys = Hotkeys::default();
+        for field in HOTKEY_FIELDS {
+            (field.set)(&mut keys, format!("spec-{}", field.key));
+        }
+        for field in HOTKEY_FIELDS {
+            assert_eq!((field.get)(&keys), format!("spec-{}", field.key));
+        }
+    }
+
+    #[test]
+    fn a_combination_moves_instead_of_being_held_twice() {
+        let mut keys = Hotkeys::default();
+        // The default `toggle_input`; giving it to another action has to leave
+        // the first one unset, or Windows refuses the second registration.
+        keys.set_spec("break_now", "ctrl+alt+I".into());
+        assert_eq!(keys.break_now, "ctrl+alt+I");
+        assert_eq!(keys.toggle_input, "");
+        // Case and padding are not what makes two hotkeys the same; the parsed
+        // combination is, and that ignores both.
+        keys.set_spec("brightness_up", " ctrl+alt+i ".into());
+        assert_eq!(keys.break_now, "");
+
+        // Clearing one touches nothing else.
+        keys.set_spec("toggle_input", "ctrl+alt+K".into());
+        keys.set_spec("toggle_input", String::new());
+        assert_eq!(keys.toggle_input, "");
+        assert_eq!(keys.brightness_up, "ctrl+alt+i", "stored without the padding");
+    }
 
     #[test]
     fn partial_json_fills_defaults() {

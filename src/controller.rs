@@ -1,7 +1,9 @@
 //! Application state shared by the tray, hotkeys and windows. Lives as a
 //! GPUI entity for the whole process; windows come and go around it.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,6 +57,14 @@ pub struct Controller {
     /// Last user-facing message (errors, hotkey results).
     pub notice: Option<SharedString>,
     pub hotkey_errors: Vec<String>,
+    /// The process's registered global hotkeys, when a manager could be made.
+    /// Owned here so the Settings tab can re-register in place; the manager
+    /// itself lives in `main`, on the thread that created its hidden window.
+    pub hotkeys: Option<Rc<RefCell<tray::HotkeyRegistry>>>,
+    /// Whether the global hotkeys are released for a recording in progress.
+    /// Tracked here as well as in the window, because the window can go away
+    /// mid-recording and something has to hand the hotkeys back.
+    hotkey_hold: bool,
     writes: HashMap<(String, u8), WriteSlot>,
     overlays: Vec<(WindowHandle<BreakOverlay>, Entity<BreakOverlay>)>,
     /// One quick-switch panel per display while it is open.
@@ -116,6 +126,8 @@ impl Controller {
                 autostart: platform::autostart_enabled(),
                 notice: None,
                 hotkey_errors: Vec::new(),
+                hotkeys: None,
+                hotkey_hold: false,
                 writes: HashMap::new(),
                 overlays: Vec::new(),
                 switch_huds: Vec::new(),
@@ -584,6 +596,21 @@ impl Controller {
         if self.stats_dirty && self.last_save.elapsed() > Duration::from_secs(30) {
             self.save_stats();
         }
+        // A recording holds the global hotkeys released, and the window that was
+        // recording is the only thing that hands them back. If it is closed
+        // first, nothing would — the hotkeys would stay dead until the next
+        // recording or the next launch, with nothing on screen to say why. The
+        // tick is the one piece of this program that runs whatever else happens.
+        if self.hotkey_hold {
+            let window_gone = match self.main_window {
+                Some(handle) => handle.update(cx, |_, _, _| ()).is_err(),
+                None => true,
+            };
+            if window_gone {
+                log::warn!("the window holding the hotkeys went away; re-registering them");
+                self.apply_hotkeys(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -734,6 +761,50 @@ impl Controller {
         i18n::set_language(language);
         self.update_config(cx, |cfg| cfg.language = language);
         cx.refresh_windows();
+    }
+
+    /// Records a new combination for one global hotkey, and applies it at once.
+    ///
+    /// The registration itself lives in `main`, on the thread that owns the
+    /// hotkey manager's hidden window, so this writes the config and asks that
+    /// registry to re-register everything. Whatever Windows turns down comes
+    /// back in [`Self::hotkey_errors`], which is what the Settings tab shows
+    /// under the row — a combination another program already owns is a normal
+    /// thing to hit, not a bug to swallow.
+    pub fn set_hotkey(&mut self, key: &'static str, spec: String, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.hotkeys.set_spec(key, spec));
+        self.apply_hotkeys(cx);
+    }
+
+    /// Releases every global hotkey, or takes them back from the config.
+    ///
+    /// Recording a combination means pressing it, and a combination that is
+    /// still bound would be delivered as well: the screen would switch input in
+    /// the middle of being asked which keys should switch input. Anything that
+    /// stops recording — a key, Escape, clicking away — has to release the hold
+    /// again, which is why this is a pair rather than a one-way switch.
+    pub fn hold_hotkeys(&mut self, hold: bool, cx: &mut Context<Self>) {
+        let Some(registry) = self.hotkeys.clone() else {
+            return;
+        };
+        if hold {
+            self.hotkey_hold = true;
+            registry.borrow_mut().clear();
+            cx.notify();
+        } else {
+            self.apply_hotkeys(cx);
+        }
+    }
+
+    /// Re-registers the configured hotkeys, and remembers what Windows refused.
+    fn apply_hotkeys(&mut self, cx: &mut Context<Self>) {
+        self.hotkey_hold = false;
+        let keys = self.config.hotkeys.clone();
+        self.hotkey_errors = match &self.hotkeys {
+            Some(registry) => registry.borrow_mut().apply(&keys),
+            None => Vec::new(),
+        };
+        cx.notify();
     }
 
     /// Everything needed to debug monitor control on this machine, as text.
