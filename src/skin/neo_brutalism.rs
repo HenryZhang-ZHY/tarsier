@@ -385,23 +385,6 @@ impl SkinStyle for NeoBrutalism {
             .hover(|style| style.top(-LIFT_TRAVEL).shadow(hard(LIFTED)))
     }
 
-    fn display(&self, text: &str, cx: &App) -> AnyElement {
-        let _ = cx;
-        v_flex()
-            .gap_2()
-            .child(
-                div()
-                    .text_2xl()
-                    .line_height(px(26.))
-                    .font_weight(FontWeight::BLACK)
-                    .text_color(ink())
-                    .child(self.case(text)),
-            )
-            // The red bar under the title: a solid block, not a rule.
-            .child(div().h(px(6.)).w(px(56.)).bg(red()))
-            .into_any_element()
-    }
-
     fn section_label(&self, text: &str, cx: &App) -> AnyElement {
         let _ = cx;
         div()

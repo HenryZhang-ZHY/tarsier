@@ -66,15 +66,6 @@ impl SkinStyle for Native {
         v_flex().p_3().rounded_md().bg(cx.theme().muted)
     }
 
-    fn display(&self, text: &str, cx: &App) -> AnyElement {
-        div()
-            .text_lg()
-            .font_weight(self.weight(Voice::Loud))
-            .text_color(cx.theme().foreground)
-            .child(SharedString::from(text.to_owned()))
-            .into_any_element()
-    }
-
     fn section_label(&self, text: &str, cx: &App) -> AnyElement {
         div()
             .text_sm()

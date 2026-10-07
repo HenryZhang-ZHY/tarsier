@@ -178,9 +178,6 @@ pub trait SkinStyle: Sync + 'static {
         el
     }
 
-    /// The loudest text on a page.
-    fn display(&self, text: &str, cx: &App) -> AnyElement;
-
     /// A caption above a group of rows.
     fn section_label(&self, text: &str, cx: &App) -> AnyElement;
 

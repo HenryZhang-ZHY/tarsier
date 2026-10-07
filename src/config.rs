@@ -360,10 +360,16 @@ pub fn load<T: DeserializeOwned + Default>(path: &PathBuf) -> T {
 }
 
 /// Writes atomically (temp file + rename) so a crash never leaves half a file.
+///
+/// Every step names the path it was working on: this is the one write in the
+/// program that can be turned down by something outside it — an antivirus, a
+/// policy, a directory that is not what it looks like — and "access denied" with
+/// no path is a bug report nobody can act on.
 pub fn save<T: Serialize>(path: &PathBuf, value: &T) -> Result<()> {
-    fs::create_dir_all(data_dir())?;
+    let dir = data_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    fs::write(&tmp, serde_json::to_vec_pretty(value)?).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("saving {}", path.display()))
 }
 

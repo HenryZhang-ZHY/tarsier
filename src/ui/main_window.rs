@@ -34,8 +34,13 @@ fn skin(cx: &App) -> &'static dyn crate::skin::SkinStyle {
 
 pub fn open(controller: Entity<Controller>, cx: &mut App) -> Option<AnyWindowHandle> {
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(580.), px(720.)), cx)),
-        window_min_size: Some(size(px(540.), px(480.))),
+        // Wide enough for the widest row in the window — a hotkey's caps and its
+        // two buttons, or a monitor's name field and its port — to sit on one
+        // line rather than wrapping or running off the edge. The height stays
+        // inside a 768-pixel laptop screen; the body scrolls, so it is only
+        // about how much of a page is worth showing at once.
+        window_bounds: Some(WindowBounds::centered(size(px(760.), px(720.)), cx)),
+        window_min_size: Some(size(px(640.), px(520.))),
         ..TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
@@ -2259,14 +2264,6 @@ impl MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tab_index = TABS.iter().position(|t| *t == self.tab).unwrap_or(0);
-        // One page frame for every tab: the skin's title treatment, then the
-        // band. Before this, each tab started wherever its first card happened
-        // to, which gave the style nowhere to put its display type.
-        let page_title = match self.tab {
-            Tab::Monitors => tr!("Monitors"),
-            Tab::Breaks => tr!("Breaks & stats"),
-            Tab::Settings => tr!("Settings"),
-        };
         let body = match self.tab {
             Tab::Monitors => self.render_monitors(cx),
             Tab::Breaks => self.render_breaks(cx),
@@ -2274,12 +2271,6 @@ impl Render for MainWindow {
         };
         let notice = self.controller.read(cx).notice.clone();
         let theme = cx.theme();
-        let page = v_flex()
-            .gap_6()
-            .child(skin(cx).display(page_title, cx))
-            .child(skin(cx).band(cx))
-            .child(body)
-            .into_any_element();
         let tabs = TabBar::new("tabs")
             .segmented()
             .small()
@@ -2339,7 +2330,7 @@ impl Render for MainWindow {
                 skin(cx)
                     .canvas(cx)
                     .flex_1()
-                    .child(div().id("body").flex_1().overflow_y_scroll().px_4().py_4().child(page)),
+                    .child(div().id("body").flex_1().overflow_y_scroll().px_4().py_4().child(body)),
             )
             .children(notice.map(|n| {
                 let controller = self.controller.clone();
