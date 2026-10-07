@@ -278,6 +278,10 @@ impl Render for MainWindow {
             // short of the caption buttons, and centring in it would sit the
             // strip half their width to the left. Nothing here takes the pointer
             // except the tabs, so dragging and the caption buttons still work.
+            //
+            // The strip occludes what is under it. Otherwise the title bar's drag
+            // area is still in the hit test there, Windows answers HTCAPTION, and
+            // a left click starts a window move instead of reaching the tab.
             .child(
                 div()
                     .absolute()
@@ -288,7 +292,7 @@ impl Render for MainWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(self.render_tabs(cx)),
+                    .child(self.render_tabs(cx).id("tabs").occlude()),
             )
     }
 }
