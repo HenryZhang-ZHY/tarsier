@@ -7,6 +7,7 @@ use chrono::{Days, Local, TimeZone};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::TabBar;
@@ -168,6 +169,9 @@ pub struct MainWindow {
     /// Focus while recording. The panel that owns it is what receives the
     /// keystroke; nothing else in the window has to know recording is on.
     hotkey_focus: FocusHandle,
+    /// The scrolling body, so the page can carry a scrollbar and so anything
+    /// that needs to scroll to a row has a handle to do it with.
+    body_scroll: ScrollHandle,
     sliders: HashMap<(String, u8), Entity<SliderState>>,
     /// Typed value fields: brightness/contrast keyed `"{monitor}#{code}"`, break durations by name.
     numbers: HashMap<String, NumberField>,
@@ -320,6 +324,7 @@ impl MainWindow {
             section: Section::General,
             recording: None,
             hotkey_focus,
+            body_scroll: ScrollHandle::new(),
             sliders: HashMap::new(),
             numbers,
             names: HashMap::new(),
@@ -2336,7 +2341,31 @@ impl Render for MainWindow {
                 skin(cx)
                     .canvas(cx)
                     .flex_1()
-                    .child(div().id("body").flex_1().overflow_y_scroll().px_4().py_4().child(body)),
+                    // A flex item refuses to shrink below its content unless it is
+                    // told otherwise, and this wrapper is a flex item with the
+                    // whole page inside it. Without the floor at zero the column
+                    // grows to the length of the page, the window clips what does
+                    // not fit, and the scroll container below has nothing to
+                    // scroll — which is how this wrapper, added with the skins,
+                    // quietly took scrolling away from every page taller than the
+                    // window.
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            // Tracking the handle gives the page a scrollbar, which
+                            // is the only thing that says there is more below the
+                            // fold, and keeps the offset somewhere a future screen
+                            // can reach it.
+                            .track_scroll(&self.body_scroll)
+                            .px_4()
+                            .py_4()
+                            .vertical_scrollbar(&self.body_scroll)
+                            .child(body),
+                    ),
             )
             .children(notice.map(|n| {
                 let controller = self.controller.clone();
