@@ -713,7 +713,17 @@ impl Controller {
     /// them all, so an open window switches without a restart.
     pub fn set_theme(&mut self, theme: config::ThemePref, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.theme = theme);
-        apply_theme(theme, cx);
+        apply_theme(self.config.skin, theme, cx);
+    }
+
+    /// Persist the choice and redraw every window in the new skin.
+    ///
+    /// A skin can bring its own mode with it — a light-only skin overrides the
+    /// saved light/dark preference — so this re-resolves both rather than
+    /// touching one.
+    pub fn set_skin(&mut self, skin: crate::skin::Skin, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.skin = skin);
+        apply_theme(skin, self.config.theme, cx);
     }
 
     /// Persist the choice and repaint every window in it. A theme is something
@@ -1001,11 +1011,19 @@ impl Controller {
     }
 }
 
-/// Apply the saved theme preference. Under `System` this must be re-run
-/// whenever Windows changes appearance, so `main` also calls it from a
-/// window appearance observer.
-pub fn apply_theme(pref: config::ThemePref, cx: &mut App) {
-    Theme::change(pref.resolve(cx.window_appearance()), None, cx);
+/// Apply the saved skin and appearance preference.
+///
+/// Under `System` this must be re-run whenever Windows changes appearance, so
+/// `main` also calls it from a window appearance observer.
+///
+/// The order is load-bearing. `Theme::change` replaces every colour with the
+/// registered theme for that mode, so the skin's palette has to be written
+/// *after* it or the mode load would undo it — and `install` is where that
+/// write lives.
+pub fn apply_theme(skin: crate::skin::Skin, pref: config::ThemePref, cx: &mut App) {
+    let mode = crate::skin::resolve_mode(skin, pref, cx.window_appearance());
+    Theme::change(mode, None, cx);
+    crate::skin::install(skin, cx);
 }
 
 #[cfg(test)]

@@ -412,6 +412,21 @@ static MAIN_WINDOW: &[(&str, &str)] = &[
     ("Health score, last 7 days", "最近 7 天健康分"),
     ("Today's sessions", "今日工作段"),
     // ---- settings tab -----------------------------------------------------
+    ("Skin", "皮肤"),
+    ("Default", "默认"),
+    ("Neo Brutalism", "新粗野主义"),
+    (
+        "The look the app has always had: the system font, soft corners and quiet greys",
+        "应用一直以来的样子：系统字体、圆角、克制的灰色",
+    ),
+    (
+        "Cream paper, pure ink, thick black strokes and hard offset shadows. Light only by design",
+        "奶油纸张、纯黑墨水、粗黑描边和硬位移阴影。按设计只提供浅色",
+    ),
+    (
+        "A skin decides the look, and some only ever ship one light / dark mode",
+        "皮肤决定整体外观，有些皮肤只提供一种浅色 / 深色模式",
+    ),
     ("Appearance", "外观"),
     (
         "System tracks the Windows light / dark setting as you change it",

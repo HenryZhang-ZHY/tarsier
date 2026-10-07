@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::breaks::BreakSettings;
 use crate::display::InputProtocolPref;
 use crate::i18n::{Language, tr};
+use crate::skin::Skin;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,7 +25,11 @@ pub struct Config {
     pub monitors: BTreeMap<String, MonitorPrefs>,
     /// Shows DDC/CI diagnostics in the UI and logs at debug level.
     pub developer_mode: bool,
-    /// Light, dark, or follow the system.
+    /// Which visual language the UI is drawn in.
+    pub skin: Skin,
+    /// Light, dark, or follow the system. Only meaningful for a skin that ships
+    /// both; a light-only skin draws light whatever this says, and the choice
+    /// is kept so it takes effect again when a skin that honours it is picked.
     pub theme: ThemePref,
     /// The language every window is drawn in.
     pub language: Language,
@@ -99,6 +104,7 @@ impl Default for Config {
             brightness_step: 10,
             monitors: BTreeMap::new(),
             developer_mode: false,
+            skin: Skin::default(),
             theme: ThemePref::default(),
             language: Language::default(),
         }
@@ -322,6 +328,18 @@ mod tests {
         // Older config files without the key follow the system.
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.theme, ThemePref::System);
+    }
+
+    #[test]
+    fn skin_round_trips_and_defaults_to_the_shipped_look() {
+        let cfg: Config = serde_json::from_str(r#"{"skin":"neo_brutalism"}"#).unwrap();
+        assert_eq!(cfg.skin, Skin::NeoBrutalism);
+        let json = serde_json::to_string(&Skin::NeoBrutalism).unwrap();
+        assert_eq!(json, r#""neo_brutalism""#);
+        // A config written before there were skins opens looking the way it was
+        // saved, which is the whole reason the native skin exists.
+        let cfg: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.skin, Skin::Native);
     }
 
     #[test]

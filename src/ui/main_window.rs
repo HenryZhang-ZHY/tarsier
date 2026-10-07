@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use chrono::{Days, Local, TimeZone};
 use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
@@ -22,9 +21,16 @@ use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
 use crate::i18n::{tr, translate};
 use crate::platform;
+use crate::skin::{Control, Level, Tone, Voice};
 use crate::stats::{self, GOOD_SCORE};
 use crate::ui::format_minutes;
 use crate::ui::number_field::{NumberField, Range};
+
+/// The active skin. Every visual decision this file makes goes through it, so
+/// the window has one voice and adding a skin never touches this file.
+fn skin(cx: &App) -> &'static dyn crate::skin::SkinStyle {
+    crate::skin::active(cx)
+}
 
 pub fn open(controller: Entity<Controller>, cx: &mut App) -> Option<AnyWindowHandle> {
     let options = WindowOptions {
@@ -127,29 +133,20 @@ const NAME_SUGGESTIONS: [&str; 4] = ["Desktop", "Work PC", "Laptop", "Console"];
 
 /// A monitor shared by several computers needs to tell them apart at a glance
 /// in three places at once (list, tray, quick-switch panel), so each endpoint
-/// keeps one hue wherever it appears.
-fn endpoint_color(index: usize) -> Hsla {
-    const HUES: [f32; 4] = [0.58, 0.09, 0.78, 0.45];
-    hsla(HUES[index % HUES.len()], 0.72, 0.55, 1.0)
+/// keeps one colour wherever it appears. Which colour is the skin's business:
+/// the native skin rotates hues, neo-brutalism hands out palette blocks.
+fn endpoint_color(index: usize, cx: &App) -> Hsla {
+    skin(cx).identity(index)
 }
 
-/// A small pill: "This PC" on the computer you are sitting at, and a monitor's
-/// own name where it has to say which one a port is showing.
-fn mark(text: &str, fg: Hsla, bg: Hsla, border: Hsla) -> impl IntoElement {
-    div()
-        .px_2()
-        .rounded_md()
-        .border_1()
-        .border_color(border)
-        .bg(bg)
-        .text_xs()
-        .text_color(fg)
-        .child(text.to_string())
+/// A small pill: "This PC" on the computer you are sitting at, and a port's own
+/// name where it has to say which one a row means.
+fn mark(text: &str, cx: &App) -> AnyElement {
+    skin(cx).chip(text, Tone::Outline, cx)
 }
 
 /// A hotkey spec like `ctrl+alt+I` drawn as key caps.
-fn hotkey_caps(spec: &str, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
+fn hotkey_caps(spec: &str, cx: &App) -> AnyElement {
     h_flex()
         .gap_1()
         .children(spec.split('+').filter(|k| !k.trim().is_empty()).map(|key| {
@@ -160,17 +157,9 @@ fn hotkey_caps(spec: &str, cx: &App) -> impl IntoElement {
                 "win" | "super" | "meta" => "Win".to_string(),
                 other => other.to_uppercase(),
             };
-            div()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.background)
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(label)
+            skin(cx).chip(&label, Tone::Outline, cx)
         }))
+        .into_any_element()
 }
 
 /// What the first-run wizard should open on for one monitor, or `None` once it
@@ -217,11 +206,14 @@ impl MainWindow {
         // Windows fires an appearance change when the user flips the system
         // theme; re-resolve so "System" tracks it without a restart. An
         // explicit light/dark choice resolves to the same mode and costs a
-        // repaint.
-        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
-            let pref = this.controller.read(cx).config.theme;
+        // repaint, and a skin that ships one mode answers the same either way.
+        let appearance = cx.observe_window_appearance(window, |this, _window, cx| {
+            let (skin, pref) = {
+                let c = this.controller.read(cx);
+                (c.config.skin, c.config.theme)
+            };
             if pref == config::ThemePref::System {
-                Theme::change(pref.resolve(window.appearance()), Some(window), cx);
+                crate::controller::apply_theme(skin, pref, cx);
             }
         });
         let mut numbers = HashMap::new();
@@ -427,9 +419,8 @@ impl MainWindow {
         let theme = cx.theme();
         let refresh = {
             let controller = self.controller.clone();
-            Button::new("refresh")
-                .ghost()
-                .small()
+            skin(cx)
+                .button("refresh".into(), Tone::Ghost, Control::Small, cx)
                 .icon(Icon::new(Lucide::RefreshCw))
                 .label(if c.scanning {
                     tr!("Scanning…")
@@ -460,9 +451,8 @@ impl MainWindow {
                     .when(c.config.developer_mode, |el| {
                         let controller = self.controller.clone();
                         el.child(
-                            Button::new("copy-diagnostics")
-                                .ghost()
-                                .small()
+                            skin(cx)
+                                .button("copy-diagnostics".into(), Tone::Ghost, Control::Small, cx)
                                 .icon(Icon::new(Lucide::Copy))
                                 .label(tr!("Copy diagnostics report"))
                                 .on_click(move |_, _, cx| {
@@ -536,7 +526,11 @@ impl MainWindow {
                     .gap_2()
                     .items_center()
                     .child(Icon::new(Lucide::Monitor))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(m.dev.name.clone()))
+                    .child(
+                        div()
+                            .font_weight(skin(cx).weight(Voice::Loud))
+                            .child(m.dev.name.clone()),
+                    )
                     .children(model.map(|model| div().text_sm().text_color(theme.muted_foreground).child(model))),
             )
             .child(feature_row(VCP_BRIGHTNESS, tr!("Brightness"), Lucide::Sun))
@@ -565,7 +559,7 @@ impl MainWindow {
             .child(
                 div()
                     .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(skin(cx).weight(Voice::Plain))
                     .child(if endpoints.len() == 2 {
                         tr!("One-key switching")
                     } else {
@@ -578,22 +572,25 @@ impl MainWindow {
         // Nothing to offer at all: this is the one case that needs setup before
         // it can do anything, so it is the one case that sends you to Settings.
         if endpoints.is_empty() {
-            return v_flex()
+            return skin(cx)
+                .panel(cx)
                 .gap_2()
-                .p_3()
-                .rounded_md()
-                .bg(theme.muted)
                 .child(header)
                 .child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("No computers sharing this monitor are set up yet.")),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("configure-{idx}")))
-                        .small()
-                        .outline()
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("configure-{idx}")),
+                            Tone::Outline,
+                            Control::Small,
+                            cx,
+                        )
                         .label(tr!("Set up on the Settings tab"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.tab = Tab::Settings;
@@ -620,6 +617,7 @@ impl MainWindow {
                     div()
                         .w(px(16.))
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(format!("{}", ix + 1))
                 }))
@@ -627,22 +625,24 @@ impl MainWindow {
                     div()
                         .size(px(9.))
                         .rounded_full()
-                        .bg(if here { theme.success } else { endpoint_color(ix) }),
+                        .bg(if here { theme.success } else { endpoint_color(ix, cx) }),
                 )
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name.clone()))
-                .when(here, |el| {
-                    el.child(mark(
-                        tr!("This PC"),
-                        theme.muted_foreground,
-                        theme.background,
-                        theme.border,
-                    ))
-                })
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(skin(cx).weight(Voice::Plain))
+                        .child(name.clone()),
+                )
+                .when(here, |el| el.child(mark(tr!("This PC"), cx)))
                 .child(div().flex_1())
                 .child(
-                    Button::new(SharedString::from(format!("go-{idx}-{ix}")))
-                        .small()
-                        .outline()
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("go-{idx}-{ix}")),
+                            Tone::Outline,
+                            Control::Small,
+                            cx,
+                        )
                         .label(tr!("Switch to {name}", name = name))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.controller.update(cx, |c, cx| c.switch_input(&id, port, cx));
@@ -658,11 +658,9 @@ impl MainWindow {
             )
         };
 
-        v_flex()
+        skin(cx)
+            .panel(cx)
             .gap_2()
-            .p_3()
-            .rounded_md()
-            .bg(theme.muted)
             .child(header)
             .children(rows)
             .child(div().text_xs().text_color(theme.muted_foreground).child(hint))
@@ -677,18 +675,22 @@ impl MainWindow {
                         .child(
                             div()
                                 .text_xs()
+                                .font_weight(skin(cx).weight(Voice::Quiet))
                                 .text_color(theme.muted_foreground)
                                 .child(tr!("These ports have no names yet.")),
                         )
                         .child(
-                            Button::new(SharedString::from(format!("name-{idx}")))
-                                .xsmall()
-                                .ghost()
-                                .label(tr!("Name them on the Settings tab"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.tab = Tab::Settings;
-                                    cx.notify();
-                                })),
+                            skin(cx).button(
+                                SharedString::from(format!("name-{idx}")),
+                                Tone::Ghost,
+                                Control::Tiny,
+                                cx,
+                            )
+                            .label(tr!("Name them on the Settings tab"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.tab = Tab::Settings;
+                                cx.notify();
+                            })),
                         ),
                 )
             })
@@ -696,6 +698,7 @@ impl MainWindow {
                 el.child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("The monitor does not report its input list, so these are the common ports; add more under extra_inputs in the config.")),
                 )
@@ -720,7 +723,7 @@ impl MainWindow {
                 .gap_2()
                 .items_center()
                 .child(Icon::new(icon).size(px(14.)))
-                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(text))
+                .child(div().text_sm().font_weight(skin(cx).weight(Voice::Plain)).child(text))
         };
 
         if !setup.naming {
@@ -734,10 +737,13 @@ impl MainWindow {
                     .gap_1()
                     .items_center()
                     .child(
-                        Button::new(SharedString::from(format!("pick-{idx}-{port}")))
-                            .small()
-                            .when(on, |b| b.primary())
-                            .when(!on, |b| b.outline())
+                        skin(cx)
+                            .button(
+                                SharedString::from(format!("pick-{idx}-{port}")),
+                                if on { Tone::Accent } else { Tone::Outline },
+                                Control::Small,
+                                cx,
+                            )
                             .label(mccs::input_source_name(port))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let entry = this.setup.entry(id.clone()).or_default();
@@ -755,11 +761,9 @@ impl MainWindow {
                     })
             });
             let count = setup.chosen.len();
-            return v_flex()
+            return skin(cx)
+                .panel(cx)
                 .gap_2()
-                .p_3()
-                .rounded_md()
-                .bg(theme.muted)
                 .child(header(
                     Lucide::ArrowLeftRight,
                     tr!("How many computers are connected to this monitor?"),
@@ -767,6 +771,7 @@ impl MainWindow {
                 .child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("Select the ports that actually have a computer behind them. Ports that are empty, or that go to a game console or a TV box, can stay unselected.")),
                 )
@@ -774,6 +779,7 @@ impl MainWindow {
                 .child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(match m.current_input {
                             // Only a starting point, read once when the monitor was
@@ -789,30 +795,38 @@ impl MainWindow {
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new(SharedString::from(format!("wizard-next-{idx}")))
-                                .primary()
-                                .label(if count >= 2 {
-                                    tr!(
-                                        n = count,
-                                        "Next: name this 1 computer" | "Next: name these {n} computers"
-                                    )
-                                } else {
-                                    tr!("Pick at least two to switch with one key").to_string()
-                                })
-                                .disabled(count < 2)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(entry) = this.setup.get_mut(&id) {
-                                        entry.naming = true;
-                                    }
-                                    cx.notify();
-                                })),
+                            skin(cx).button(
+                                SharedString::from(format!("wizard-next-{idx}")),
+                                Tone::Accent,
+                                Control::Medium,
+                                cx,
+                            )
+                            .label(if count >= 2 {
+                                tr!(
+                                    n = count,
+                                    "Next: name this 1 computer" | "Next: name these {n} computers"
+                                )
+                            } else {
+                                tr!("Pick at least two to switch with one key").to_string()
+                            })
+                            .disabled(count < 2)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(entry) = this.setup.get_mut(&id) {
+                                    entry.naming = true;
+                                }
+                                cx.notify();
+                            })),
                         )
                         .child(
                             // The names live on the monitor, so a machine that
                             // has already been set up can hand them over.
-                            Button::new(SharedString::from(format!("wizard-paste-{idx}")))
-                                .outline()
-                                .label(tr!("Paste from another computer"))
+                            skin(cx).button(
+                                SharedString::from(format!("wizard-paste-{idx}")),
+                                Tone::Outline,
+                                Control::Medium,
+                                cx,
+                            )
+                            .label(tr!("Paste from another computer"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let text = cx
                                         .read_from_clipboard()
@@ -842,10 +856,13 @@ impl MainWindow {
                     .get(&key)
                     .map(|state| state.read(cx).value() == name)
                     .unwrap_or(false);
-                Button::new(SharedString::from(format!("suggest-{idx}-{ix}-{label}")))
-                    .xsmall()
-                    .when(picked, |b| b.primary())
-                    .when(!picked, |b| b.ghost())
+                skin(cx)
+                    .button(
+                        SharedString::from(format!("suggest-{idx}-{ix}-{label}")),
+                        if picked { Tone::Accent } else { Tone::Ghost },
+                        Control::Tiny,
+                        cx,
+                    )
                     .label(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(state) = this.names.get(&key).cloned() {
@@ -866,6 +883,7 @@ impl MainWindow {
                             div()
                                 .w(px(18.))
                                 .text_xs()
+                                .font_weight(skin(cx).weight(Voice::Quiet))
                                 .text_color(theme.muted_foreground)
                                 .child(format!("{}", ix + 1)),
                         )
@@ -884,7 +902,7 @@ impl MainWindow {
                                 .child(div().size(px(9.)).rounded_full().bg(if here {
                                     theme.success
                                 } else {
-                                    endpoint_color(ix)
+                                    endpoint_color(ix, cx)
                                 }))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(entry) = this.setup.get_mut(&id) {
@@ -898,34 +916,23 @@ impl MainWindow {
                         .child(
                             div()
                                 .text_xs()
+                                .font_weight(skin(cx).weight(Voice::Quiet))
                                 .text_color(theme.muted_foreground)
                                 .child(mccs::input_source_name(port)),
                         )
-                        .when(here, |el| {
-                            el.child(
-                                div()
-                                    .px_2()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(tr!("This PC")),
-                            )
-                        }),
+                        .when(here, |el| el.child(mark(tr!("This PC"), cx))),
                 )
                 .child(h_flex().gap_1().pl_4().children(suggestions))
         });
 
-        v_flex()
+        skin(cx)
+            .panel(cx)
             .gap_3()
-            .p_3()
-            .rounded_md()
-            .bg(theme.muted)
             .child(header(Lucide::Laptop, tr!("Give them names")))
             .child(
                 div()
                     .text_xs()
+                    .font_weight(skin(cx).weight(Voice::Quiet))
                     .text_color(theme.muted_foreground)
                     .child(tr!("The names appear here, in the tray menu, and in the quick-switch panel — they are the only thing that lets you tell the machines apart at a glance.")),
             )
@@ -933,6 +940,7 @@ impl MainWindow {
             .child(
                 div()
                     .text_xs()
+                    .font_weight(skin(cx).weight(Voice::Quiet))
                     .text_color(theme.muted_foreground)
                     .child(tr!(
                         "This computer takes its name from the system ({hostname}); for the rest, click a common name. Install tarsier on the other computers too and paste this set of names across, and the 3rd and 4th need no typing at all.",
@@ -943,23 +951,31 @@ impl MainWindow {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new(SharedString::from(format!("wizard-back-{idx}")))
-                            .outline()
-                            .label(tr!("Back"))
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _, _, cx| {
-                                    if let Some(entry) = this.setup.get_mut(&id) {
-                                        entry.naming = false;
-                                    }
-                                    cx.notify();
+                        skin(cx).button(
+                            SharedString::from(format!("wizard-back-{idx}")),
+                            Tone::Outline,
+                            Control::Medium,
+                            cx,
+                        )
+                        .label(tr!("Back"))
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| {
+                                if let Some(entry) = this.setup.get_mut(&id) {
+                                    entry.naming = false;
                                 }
-                            })),
+                                cx.notify();
+                            }
+                        })),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("wizard-done-{idx}")))
-                            .primary()
-                            .label(tr!("Done"))
+                        skin(cx).button(
+                            SharedString::from(format!("wizard-done-{idx}")),
+                            Tone::Accent,
+                            Control::Medium,
+                            cx,
+                        )
+                        .label(tr!("Done"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(setup) = this.setup.get(&id).cloned() else {
                                     return;
@@ -996,9 +1012,13 @@ impl MainWindow {
                         // monitor that reports exactly two inputs opens here:
                         // a machine that is already set up can just hand the
                         // names over instead of them being typed again.
-                        Button::new(SharedString::from(format!("wizard-paste2-{idx}")))
-                            .outline()
-                            .label(tr!("Paste from another computer"))
+                        skin(cx).button(
+                            SharedString::from(format!("wizard-paste2-{idx}")),
+                            Tone::Outline,
+                            Control::Medium,
+                            cx,
+                        )
+                        .label(tr!("Paste from another computer"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let text = cx
                                     .read_from_clipboard()
@@ -1043,10 +1063,13 @@ impl MainWindow {
                 let free = inputs.iter().copied().filter(|p| *p == port || !endpoints.contains(p));
                 h_flex().gap_1().flex_wrap().pl_4().children(free.map(|p| {
                     let id = id.clone();
-                    Button::new(SharedString::from(format!("setport-{idx}-{ix}-{p}")))
-                        .xsmall()
-                        .when(p == port, |b| b.primary())
-                        .when(p != port, |b| b.ghost())
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("setport-{idx}-{ix}-{p}")),
+                            if p == port { Tone::Accent } else { Tone::Ghost },
+                            Control::Tiny,
+                            cx,
+                        )
                         .label(mccs::input_source_name(p))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.controller
@@ -1070,6 +1093,7 @@ impl MainWindow {
                             div()
                                 .w(px(16.))
                                 .text_xs()
+                                .font_weight(skin(cx).weight(Voice::Quiet))
                                 .text_color(theme.muted_foreground)
                                 .child(format!("{}", ix + 1))
                         }))
@@ -1087,7 +1111,7 @@ impl MainWindow {
                                 .child(div().size(px(9.)).rounded_full().bg(if here {
                                     theme.success
                                 } else {
-                                    endpoint_color(ix)
+                                    endpoint_color(ix, cx)
                                 }))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.controller.update(cx, |c, cx| c.set_local_input(&id, port, cx));
@@ -1095,20 +1119,17 @@ impl MainWindow {
                                 }))
                         })
                         .child(div().w(px(158.)).children(self.names.get(&key).map(Input::new)))
-                        .when(here, |el| {
-                            el.child(mark(
-                                tr!("This PC"),
-                                theme.muted_foreground,
-                                theme.background,
-                                theme.border,
-                            ))
-                        })
+                        .when(here, |el| el.child(mark(tr!("This PC"), cx)))
                         .child(div().flex_1())
                         .child({
                             let key = key.clone();
-                            Button::new(SharedString::from(format!("port-{idx}-{ix}")))
-                                .xsmall()
-                                .outline()
+                            skin(cx)
+                                .button(
+                                    SharedString::from(format!("port-{idx}-{ix}")),
+                                    Tone::Outline,
+                                    Control::Tiny,
+                                    cx,
+                                )
                                 .label(mccs::input_source_name(port))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.port_picker =
@@ -1118,9 +1139,13 @@ impl MainWindow {
                         })
                         .children((n > 2).then(|| {
                             let id = id.clone();
-                            Button::new(SharedString::from(format!("drop-{idx}-{ix}")))
-                                .xsmall()
-                                .ghost()
+                            skin(cx)
+                                .button(
+                                    SharedString::from(format!("drop-{idx}-{ix}")),
+                                    Tone::Ghost,
+                                    Control::Tiny,
+                                    cx,
+                                )
                                 .label("✕")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.port_picker = None;
@@ -1131,30 +1156,32 @@ impl MainWindow {
                 .children(strip)
         });
 
-        v_flex()
+        skin(cx)
+            .panel(cx)
             .gap_2()
-            .p_3()
-            .rounded_md()
-            .bg(theme.muted)
             .children(rows)
             .child({
                 let id = id.clone();
                 let free = inputs.iter().copied().find(|p| !endpoints.contains(p));
-                Button::new(SharedString::from(format!("add-{idx}")))
-                    .xsmall()
-                    .ghost()
-                    .label(tr!("+ Add computer"))
-                    .disabled(free.is_none())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(port) = free {
-                            this.controller.update(cx, |c, cx| c.add_endpoint(&id, port, cx));
-                        }
-                    }))
+                skin(cx).button(
+                    SharedString::from(format!("add-{idx}")),
+                    Tone::Ghost,
+                    Control::Tiny,
+                    cx,
+                )
+                .label(tr!("+ Add computer"))
+                .disabled(free.is_none())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(port) = free {
+                        this.controller.update(cx, |c, cx| c.add_endpoint(&id, port, cx));
+                    }
+                }))
             })
             .when(!m.inputs_reported(), |el| {
                 el.child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("The monitor does not report its input list, so these are the common ports; add more under extra_inputs in the config.")),
                 )
@@ -1178,6 +1205,7 @@ impl MainWindow {
                 if endpoints.is_empty() {
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("This monitor does not report an input list; add its ports under extra_inputs in the config first."))
                         .into_any_element()
@@ -1192,7 +1220,7 @@ impl MainWindow {
             .child(
                 div()
                     .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(skin(cx).weight(Voice::Plain))
                     .child(m.dev.name.clone()),
             )
             .child(body)
@@ -1245,7 +1273,7 @@ impl MainWindow {
                     .gap_2()
                     .items_center()
                     .child(Icon::new(Lucide::Timer))
-                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title)),
+                    .child(div().text_lg().font_weight(skin(cx).weight(Voice::Loud)).child(title)),
             )
             .child(
                 Progress::new("work")
@@ -1259,8 +1287,8 @@ impl MainWindow {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("snooze")
-                            .primary()
+                        skin(cx)
+                            .button("snooze".into(), Tone::Accent, Control::Medium, cx)
                             .label(tr!(
                                 n = c.config.breaks.snooze_minutes,
                                 "Snooze for 1 min" | "Snooze for {n} min"
@@ -1268,8 +1296,8 @@ impl MainWindow {
                             .on_click(move |_, _, cx| snooze.update(cx, |c, cx| c.snooze(cx))),
                     )
                     .child(
-                        Button::new("skip")
-                            .outline()
+                        skin(cx)
+                            .button("skip".into(), Tone::Outline, Control::Medium, cx)
                             .label(tr!("Skip this break"))
                             .on_click(move |_, _, cx| skip.update(cx, |c, cx| c.skip(cx))),
                     )
@@ -1277,16 +1305,16 @@ impl MainWindow {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("break-now")
-                            .primary()
+                        skin(cx)
+                            .button("break-now".into(), Tone::Accent, Control::Medium, cx)
                             .icon(Icon::new(Lucide::Coffee))
                             .label(tr!("Take a break now"))
                             .disabled(t.phase() != Phase::Working)
                             .on_click(move |_, _, cx| controller.update(cx, |c, cx| c.break_now(cx))),
                     )
                     .child(
-                        Button::new("pause")
-                            .outline()
+                        skin(cx)
+                            .button("pause".into(), Tone::Outline, Control::Medium, cx)
                             .label(if c.is_paused() {
                                 tr!("Resume reminders")
                             } else {
@@ -1392,11 +1420,6 @@ impl MainWindow {
                     c.stats.day(date).and_then(|d| d.score())
                 };
                 let height = score.map_or(4.0, |s| (s as f32 / 100.0 * bar_max).max(4.0));
-                let color = match score {
-                    Some(s) if s >= GOOD_SCORE => theme.success,
-                    Some(_) => theme.warning,
-                    None => theme.muted,
-                };
                 v_flex()
                     .flex_1()
                     .items_center()
@@ -1404,10 +1427,11 @@ impl MainWindow {
                     .child(
                         div()
                             .text_xs()
+                            .font_weight(skin(cx).weight(Voice::Quiet))
                             .text_color(theme.muted_foreground)
                             .child(score.map_or(String::new(), |s| s.to_string())),
                     )
-                    .child(div().w_full().h(px(height)).rounded_md().bg(color))
+                    .child(skin(cx).status_bar(level_of(score), px(height), cx))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(if ago == 0 {
                         tr!("Today").to_string()
                     } else {
@@ -1450,6 +1474,7 @@ impl MainWindow {
                         div()
                             .w(px(56.))
                             .text_right()
+                            .font_weight(skin(cx).weight(Voice::Plain))
                             .text_color(score_color(Some(score), cx))
                             .child(tr!("{score} points", score = score)),
                     ),
@@ -1532,6 +1557,27 @@ impl MainWindow {
         // Three small buttons rather than a dropdown: every option is visible at
         // a glance, and this is the same primary/outline pair idiom the monitor
         // input pickers use.
+        let skin_picker = || {
+            let controller = self.controller.clone();
+            let current = c.config.skin;
+            h_flex()
+                .gap_1()
+                .children(crate::skin::Skin::ALL.into_iter().map(|pick| {
+                    let controller = controller.clone();
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("skin-{pick:?}")),
+                            if pick == current { Tone::Accent } else { Tone::Ghost },
+                            Control::Small,
+                            cx,
+                        )
+                        .label(pick.label())
+                        .on_click(move |_, _, cx| {
+                            controller.update(cx, |c, cx| c.set_skin(pick, cx));
+                        })
+                }))
+        };
+
         let theme_picker = || {
             let controller = self.controller.clone();
             let current = c.config.theme;
@@ -1539,10 +1585,13 @@ impl MainWindow {
                 .gap_1()
                 .children(config::ThemePref::ALL.into_iter().map(|pref| {
                     let controller = controller.clone();
-                    Button::new(SharedString::from(format!("theme-{pref:?}")))
-                        .xsmall()
-                        .when(pref == current, |b| b.primary())
-                        .when(pref != current, |b| b.ghost())
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("theme-{pref:?}")),
+                            if pref == current { Tone::Accent } else { Tone::Ghost },
+                            Control::Small,
+                            cx,
+                        )
                         .label(pref.label())
                         .on_click(move |_, _, cx| {
                             controller.update(cx, |c, cx| c.set_theme(pref, cx));
@@ -1557,10 +1606,13 @@ impl MainWindow {
                 .gap_1()
                 .children(crate::i18n::Language::ALL.into_iter().map(|lang| {
                     let controller = controller.clone();
-                    Button::new(SharedString::from(format!("language-{lang:?}")))
-                        .xsmall()
-                        .when(lang == current, |b| b.primary())
-                        .when(lang != current, |b| b.ghost())
+                    skin(cx)
+                        .button(
+                            SharedString::from(format!("language-{lang:?}")),
+                            if lang == current { Tone::Accent } else { Tone::Ghost },
+                            Control::Small,
+                            cx,
+                        )
                         // A language names itself, in its own language: whoever
                         // picked the wrong one still has to find the way back.
                         .label(lang.label())
@@ -1570,18 +1622,63 @@ impl MainWindow {
                 }))
         };
 
-        let theme_row = h_flex()
+        let skin_row = h_flex()
             .justify_between()
             .gap_4()
             .child(
-                v_flex().child(tr!("Appearance")).child(
+                v_flex().child(tr!("Skin")).child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
-                        .child(tr!("System tracks the Windows light / dark setting as you change it")),
+                        .child(skin(cx).note()),
                 ),
             )
-            .child(theme_picker());
+            .child(skin_picker());
+
+        // A skin may only ship one mode. Rather than showing a picker whose
+        // buttons do nothing, the row says so and states which mode is in use —
+        // the saved preference is kept either way, so it returns the moment a
+        // skin that honours it is picked.
+        let modes = c.config.skin.style().modes();
+        let appearance_row = if modes.len() == 1 {
+            h_flex()
+                .justify_between()
+                .gap_4()
+                .child(
+                    v_flex().child(tr!("Appearance")).child(
+                        div()
+                            .text_xs()
+                            .font_weight(skin(cx).weight(Voice::Quiet))
+                            .text_color(theme.muted_foreground)
+                            .child(tr!(
+                                "A skin decides the look, and some only ever ship one light / dark mode"
+                            )),
+                    ),
+                )
+                .child(skin(cx).chip(
+                    match modes[0] {
+                        ThemeMode::Light => tr!("Light"),
+                        ThemeMode::Dark => tr!("Dark"),
+                    },
+                    Tone::Muted,
+                    cx,
+                ))
+        } else {
+            h_flex()
+                .justify_between()
+                .gap_4()
+                .child(
+                    v_flex().child(tr!("Appearance")).child(
+                        div()
+                            .text_xs()
+                            .font_weight(skin(cx).weight(Voice::Quiet))
+                            .text_color(theme.muted_foreground)
+                            .child(tr!("System tracks the Windows light / dark setting as you change it")),
+                    ),
+                )
+                .child(theme_picker())
+        };
 
         let language_row = h_flex()
             .justify_between()
@@ -1590,6 +1687,7 @@ impl MainWindow {
                 v_flex().child(tr!("Language")).child(
                     div()
                         .text_xs()
+                        .font_weight(skin(cx).weight(Voice::Quiet))
                         .text_color(theme.muted_foreground)
                         .child(tr!("Switching redraws every window right away")),
                 ),
@@ -1599,7 +1697,8 @@ impl MainWindow {
         let general = card(cx)
             .gap_4()
             .child(section_label(tr!("General"), cx))
-            .child(theme_row)
+            .child(skin_row)
+            .child(appearance_row)
             .child(language_row)
             .child(toggle_row(
                 "autostart",
@@ -1662,6 +1761,7 @@ impl MainWindow {
                     el.child(
                         div()
                             .text_xs()
+                            .font_weight(skin(cx).weight(Voice::Quiet))
                             .text_color(theme.muted_foreground)
                             .child(tr!("No external monitors that support DDC/CI have been detected yet.")),
                     )
@@ -1672,7 +1772,7 @@ impl MainWindow {
                         .enumerate()
                         .map(|(idx, m)| self.render_input_settings(idx, m, c, cx)),
                 )
-                .child(div().h(px(1.)).bg(theme.border))
+                .child(skin(cx).band(cx))
                 .child(div().text_xs().text_color(theme.muted_foreground).child(
                     tr!("The port-to-name mapping lives on the monitor, so it holds whichever computer you fill it in on. Set it up once and move it to the rest, and you never type it in again."),
                 ))
@@ -1680,9 +1780,7 @@ impl MainWindow {
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new("export-switching")
-                                .small()
-                                .outline()
+                            skin(cx).button("export-switching".into(), Tone::Outline, Control::Small, cx)
                                 .icon(Icon::new(Lucide::Copy))
                                 .label(tr!("Copy settings"))
                                 .on_click(move |_, _, cx| {
@@ -1696,9 +1794,7 @@ impl MainWindow {
                                 }),
                         )
                         .child(
-                            Button::new("import-switching")
-                                .small()
-                                .outline()
+                            skin(cx).button("import-switching".into(), Tone::Outline, Control::Small, cx)
                                 .label(tr!("Import settings"))
                                 .on_click(move |_, _, cx| {
                                     let text = cx
@@ -1726,14 +1822,13 @@ impl MainWindow {
             .children(c.hotkey_errors.iter().map(|e| {
                 div()
                     .text_xs()
-                    .text_color(theme.danger)
+                    .text_color(skin(cx).status_text(Level::Poor, cx))
                     .child(tr!("Registration failed: {e}", e = e))
             }))
             .child(
                 h_flex().pt_2().child(
-                    Button::new("open-config")
-                        .small()
-                        .outline()
+                    skin(cx)
+                        .button("open-config".into(), Tone::Outline, Control::Small, cx)
                         .label(tr!("Open config folder"))
                         .on_click(|_, _, cx| {
                             let dir = config::data_dir();
@@ -1752,6 +1847,7 @@ impl MainWindow {
             .child(
                 div()
                     .text_xs()
+                    .font_weight(skin(cx).weight(Voice::Quiet))
                     .text_color(theme.muted_foreground)
                     .child(format!("tarsier v{}", env!("CARGO_PKG_VERSION"))),
             )
@@ -1762,6 +1858,15 @@ impl MainWindow {
 impl Render for MainWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tab_index = TABS.iter().position(|t| *t == self.tab).unwrap_or(0);
+        // One page frame for every tab: the skin's title treatment, then the
+        // band. Before this, each tab started wherever its first card happened
+        // to, which gave the style nowhere to put its display type.
+        let page_title = match self.tab {
+            Tab::Monitors => tr!("Monitors"),
+            Tab::Breaks => tr!("Breaks"),
+            Tab::Stats => tr!("Stats"),
+            Tab::Settings => tr!("Settings"),
+        };
         let body = match self.tab {
             Tab::Monitors => self.render_monitors(cx),
             Tab::Breaks => self.render_breaks(cx),
@@ -1770,14 +1875,20 @@ impl Render for MainWindow {
         };
         let notice = self.controller.read(cx).notice.clone();
         let theme = cx.theme();
+        let page = v_flex()
+            .gap_6()
+            .child(skin(cx).display(page_title, cx))
+            .child(skin(cx).band(cx))
+            .child(body)
+            .into_any_element();
         let tabs = TabBar::new("tabs")
             .segmented()
             .small()
             .selected_index(tab_index)
-            .child(tr!("Monitors"))
-            .child(tr!("Breaks"))
-            .child(tr!("Stats"))
-            .child(tr!("Settings"))
+            .child(skin(cx).case(tr!("Monitors")))
+            .child(skin(cx).case(tr!("Breaks")))
+            .child(skin(cx).case(tr!("Stats")))
+            .child(skin(cx).case(tr!("Settings")))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                 this.tab = TABS[*ix];
                 cx.notify();
@@ -1785,27 +1896,39 @@ impl Render for MainWindow {
 
         // Self-drawn title bar: brand on the left, tabs in the drag area, native
         // min/max/close hit-testing (snap layouts keep working) on the right.
+        // The skin's title-bar colours are the band this sits on.
         let title_bar = TitleBar::new()
             .h(px(46.))
             .pl_4()
-            .bg(theme.background)
-            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .border_color(theme.title_bar_border)
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
                     .child(img(brand_icon()).size(px(22.)))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("tarsier")),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(skin(cx).weight(Voice::Loud))
+                            .child(skin(cx).case("tarsier")),
+                    ),
             )
             .child(div().pr_2().child(tabs));
 
         v_flex()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .font_family(theme.font_family.clone())
+            .font(skin(cx).font(cx))
             .child(title_bar)
-            .child(div().id("body").flex_1().overflow_y_scroll().px_4().py_4().child(body))
+            // The canvas is a layer rather than a background colour so a skin
+            // can put a texture behind the content and keep it still while the
+            // body scrolls over it.
+            .child(
+                skin(cx)
+                    .canvas(cx)
+                    .flex_1()
+                    .child(div().id("body").flex_1().overflow_y_scroll().px_4().py_4().child(page)),
+            )
             .children(notice.map(|n| {
                 let controller = self.controller.clone();
                 h_flex()
@@ -1820,9 +1943,8 @@ impl Render for MainWindow {
                     .text_sm()
                     .child(n)
                     .child(
-                        Button::new("dismiss")
-                            .xsmall()
-                            .ghost()
+                        skin(cx)
+                            .button("dismiss".into(), Tone::Ghost, Control::Tiny, cx)
                             .icon(IconName::Close)
                             .on_click(move |_, _, cx| {
                                 controller.update(cx, |c, cx| {
@@ -1854,6 +1976,7 @@ fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
                     .w(px(56.))
                     .flex_none()
                     .text_xs()
+                    .font_weight(skin(cx).weight(Voice::Quiet))
                     .text_color(theme.muted_foreground)
                     .child(label),
             )
@@ -1862,14 +1985,14 @@ fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
     let trace = m.dev.trace();
     let lines = trace.iter().rev().take(RECENT).rev().map(|entry| {
         let failed = entry.result.is_err();
-        mono(display::diagnostics::trace_line(entry)).when(failed, |el| el.text_color(theme.danger))
+        mono(display::diagnostics::trace_line(entry))
+            .when(failed, |el| el.text_color(skin(cx).status_text(Level::Poor, cx)))
     });
-    v_flex()
+    // The panel is a recessed block inside the monitor card, so it takes the
+    // skin's panel rather than inventing a border of its own.
+    skin(cx)
+        .panel(cx)
         .gap_2()
-        .p_3()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
         .child(
             h_flex()
                 .gap_2()
@@ -1878,7 +2001,7 @@ fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
                 .child(
                     div()
                         .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(skin(cx).weight(Voice::Plain))
                         .child(tr!("Diagnostics")),
                 ),
         )
@@ -1892,21 +2015,21 @@ fn render_diagnostics(m: &MonitorEntry, cx: &App) -> impl IntoElement {
 }
 
 fn card(cx: &App) -> Div {
-    let theme = cx.theme();
-    v_flex()
-        .p_4()
-        .rounded_lg()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.background)
+    skin(cx).card(cx)
 }
 
-fn section_label(text: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .text_sm()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
+fn section_label(text: &'static str, cx: &App) -> AnyElement {
+    skin(cx).section_label(text, cx)
+}
+
+/// The status a score reads as, before the skin decides how to say it.
+fn level_of(score: Option<u8>) -> Level {
+    match score {
+        Some(s) if s >= GOOD_SCORE => Level::Good,
+        Some(s) if s >= 50 => Level::Fair,
+        Some(_) => Level::Poor,
+        None => Level::Neutral,
+    }
 }
 
 /// The app icon, decoded once so GPUI's image cache keeps hitting the same id.
@@ -1923,29 +2046,29 @@ fn brand_icon() -> Arc<Image> {
 
 fn stat_tile(icon: Lucide, value: String, label: &'static str, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    card(cx)
-        .flex_1()
-        .gap_1()
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .text_sm()
-                .child(Icon::new(icon).size(px(14.)))
-                .child(label),
-        )
-        .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(value))
+    // The one place a surface answers the pointer: a summary tile is glanceable
+    // rather than clickable, so it gets the style's tactile lift without
+    // pretending to be a button.
+    skin(cx).lift(
+        card(cx)
+            .flex_1()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .text_color(theme.muted_foreground)
+                    .text_sm()
+                    .child(Icon::new(icon).size(px(14.)))
+                    .child(label),
+            )
+            .child(div().text_xl().font_weight(skin(cx).weight(Voice::Loud)).child(value)),
+        cx,
+    )
 }
 
 fn score_color(score: Option<u8>, cx: &App) -> Hsla {
-    let theme = cx.theme();
-    match score {
-        Some(s) if s >= GOOD_SCORE => theme.success,
-        Some(s) if s >= 50 => theme.warning,
-        Some(_) => theme.danger,
-        None => theme.muted_foreground,
-    }
+    skin(cx).status_text(level_of(score), cx)
 }
 
 #[cfg(test)]

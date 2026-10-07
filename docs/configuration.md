@@ -43,6 +43,21 @@ Developer mode, also switchable from the UI. See [Developer mode](developer-mode
 
 `"en"` (the default) or `"zh"`, also switchable from the UI. Every window and the tray menu are drawn in it. English is the source language, so a string with no Chinese translation shows up in English rather than as a missing label.
 
+### `skin`
+
+Which visual language the main window is drawn in, also switchable from the UI.
+
+| Value | Look |
+| --- | --- |
+| `"native"` (the default) | Whatever the component library draws out of the box: the system font, soft corners, quiet greys. This is the look tarsier had before there were skins. |
+| `"neo_brutalism"` | Cream paper, pure ink, thick black strokes, hard offset shadows, and the bundled Space Grotesk display face. |
+
+A skin is more than a palette: it owns the canvas, the panels, the type and the controls. It is also the **top-level** appearance choice, because a skin can be drawn for only some modes. Neo-brutalism is a single, definitive light palette by design, so choosing it pins the window to light and the Settings tab reports that instead of offering a picker.
+
+### `theme`
+
+`"light"`, `"dark"`, or `"system"` (the default), also switchable from the UI. It is honoured by any skin that ships both modes. A skin that ships one — neo-brutalism — draws that one whatever this says, and the value is kept, so switching back to a skin that honours it restores the choice exactly. Under `"system"` the value tracks the Windows light / dark setting live.
+
 ### `breaks`
 
 ```json

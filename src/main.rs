@@ -7,6 +7,7 @@ mod display;
 mod i18n;
 mod logger;
 mod platform;
+mod skin;
 mod stats;
 mod tray;
 mod ui;
@@ -40,6 +41,9 @@ fn main() {
 
     gpui_kit::application().with_assets(ui::AppAssets).run(move |cx| {
         gpui_kit::init(cx);
+        // Before any window exists: a family GPUI cannot find falls back in
+        // silence, so this cannot be deferred until something needs it.
+        skin::register_fonts(cx);
         // GPUI quits when the last window closes on Windows by default; we live
         // in the tray, so only the tray's "Quit" (or logoff) ends the process.
         cx.set_quit_mode(QuitMode::Explicit);
@@ -47,8 +51,13 @@ fn main() {
         Theme::global_mut(cx).font_family = "Microsoft YaHei UI".into();
 
         let controller = Controller::init(cx);
-        // The saved preference wins over the system appearance we just synced.
-        controller::apply_theme(controller.read(cx).config.theme, cx);
+        // The saved skin and appearance win over the system appearance we just
+        // synced.
+        let (saved_skin, saved_theme) = {
+            let c = controller.read(cx);
+            (c.config.skin, c.config.theme)
+        };
+        controller::apply_theme(saved_skin, saved_theme, cx);
         let tray = Tray::new().inspect_err(|e| log::error!("tray icon: {e}")).ok();
         let hotkey = Hotkey::new(&controller.read(cx).config.hotkeys)
             .inspect_err(|e| log::error!("hotkeys: {e}"))

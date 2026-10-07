@@ -6,6 +6,17 @@ A small Windows utility for managing monitors and screen time, written in Rust w
 
 It lives in the tray, draws its own title bar, supports light, dark, and follow-system themes, and is drawn in English or Chinese.
 
+## Skins
+
+The window is drawn in one of two visual languages, switchable on the Settings tab:
+
+- **Default** — the look tarsier has always had: the system font, soft corners, quiet greys.
+- **Neo Brutalism** — cream paper, pure ink, thick black strokes and hard offset shadows, set in a bundled copy of Space Grotesk. Light only, by design: the style is a single definitive light palette rather than a theme that happens to be bright.
+
+A skin owns the whole visual language, not just the colours — the canvas and its grid, the panels, the type scale, the badges and the buttons — so the two never mix. Adding one means writing a single file that implements `SkinStyle`; no screen has to be touched, because screens ask for "a card" or "an accent button" rather than for a border width.
+
+The break overlay and the quick-switch panel take the palette from the active skin but keep their own layouts: one is a full-screen dimmer, the other a compact popup, and neither reads as a card.
+
 ## Features
 
 - **Brightness / contrast**: adjust external monitors directly over DDC/CI.
@@ -39,4 +50,4 @@ Hotkeys, break durations, and everything else live on the Settings tab of the ma
 
 ## License
 
-MIT. Icons from [Lucide](https://lucide.dev) (ISC).
+MIT. Icons from [Lucide](https://lucide.dev) (ISC). The neo-brutalism skin bundles [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk) (SIL Open Font License 1.1; the licence and its provenance note are in `assets/fonts/`).
