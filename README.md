@@ -26,7 +26,7 @@ The quick-switch panel is drawn in the active skin too. The break overlay keeps 
 
 ## Install
 
-Download `tarsier.exe` from [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases) and run it. No installer needed.
+Download `tarsier-<version>-windows-x86_64.zip` from [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases), unzip it anywhere and run `tarsier.exe`. No installer needed.
 
 ## Usage
 

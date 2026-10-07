@@ -26,7 +26,7 @@
 
 ## 安装
 
-从 [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases) 下载 `tarsier.exe` 直接运行即可，无需安装。
+从 [Releases](https://github.com/HenryZhang-ZHY/tarsier/releases) 下载 `tarsier-<版本>-windows-x86_64.zip`，解压到任意位置后运行 `tarsier.exe` 即可，无需安装。
 
 ## 使用
 
