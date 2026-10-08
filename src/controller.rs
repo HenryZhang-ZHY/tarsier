@@ -12,7 +12,7 @@ use chrono::{Local, NaiveDate, NaiveDateTime};
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 
-use crate::breaks::{BreakEvent, BreakTracker, Phase};
+use crate::breaks::{BreakEvent, BreakKind, BreakTracker, Phase};
 use crate::config::{self, Config, MonitorPrefs};
 use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
@@ -840,15 +840,28 @@ impl Controller {
         cx.notify();
     }
 
-    /// Today's score including the running session.
-    pub fn today_score(&self) -> Option<u8> {
-        let today = activity_day(now_ts());
-        let open = match self.tracker.phase() {
-            Phase::Away => None,
-            _ => Some((self.tracker.session_active(), self.tracker.settings().work_secs)),
-        };
-        let empty = Default::default();
-        self.stats.day(today).unwrap_or(&empty).score_with(open)
+    /// The stretch of work still running, as a session that ends now.
+    pub fn open_session(&self) -> Option<Session> {
+        let t = &self.tracker;
+        if t.phase() == Phase::Away || t.session_active() == 0 {
+            return None;
+        }
+        Some(Session {
+            start: t.session_start(),
+            end: now_ts(),
+            active_secs: t.session_active(),
+            target_secs: t.settings().work_secs,
+            kind: BreakKind::Natural,
+        })
+    }
+
+    /// Today's time at the computer, the stretch still running included.
+    pub fn worked_today(&self) -> u64 {
+        let open = self.open_session();
+        self.stats
+            .day(activity_day(now_ts()))
+            .map_or(0, |day| day.sessions_with(open.as_ref()).map(|s| s.active_secs).sum())
+            .max(open.map_or(0, |s| s.active_secs))
     }
 
     /// Deferred: the overlay reads this entity while it is being built, and
@@ -1486,9 +1499,13 @@ impl Controller {
                 }
             }
         };
-        match self.today_score() {
-            Some(score) => tr!("tarsier · {state} · health {score} today", state = state, score = score),
-            None => format!("tarsier · {state}"),
+        match self.worked_today() {
+            0 => format!("tarsier · {state}"),
+            secs => tr!(
+                "tarsier · {state} · {time} of work today",
+                state = state,
+                time = crate::ui::format_minutes(secs)
+            ),
         }
     }
 

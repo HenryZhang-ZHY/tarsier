@@ -1,34 +1,36 @@
-//! The Breaks tab: where this stretch of work stands, and how the days behind
-//! it went. Breaks and their scores share a page because the score is nothing
-//! but the sessions the timer above it produces.
+//! The Breaks tab: where this stretch of work stands, how the week went, and
+//! the two habits it adds up to.
+//!
+//! Nothing on it is a score. The week is drawn as it happened — when each
+//! stretch of work ran, which ones ran long, when each evening ended — and the
+//! habits are said in plain numbers, so the user can see their own rhythm
+//! rather than be graded on it.
 
-use chrono::{Days, Local, TimeZone};
+use chrono::{Datelike, Days, NaiveDate, NaiveDateTime};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{MainWindow, Section};
-use crate::breaks::{BreakKind, Phase};
-use crate::controller::{Controller, now_ts};
-use crate::i18n::tr;
+use crate::breaks::Phase;
+use crate::controller::Controller;
+use crate::evening::{self, Status};
+use crate::i18n::{tr, translate};
 use crate::skin::{Control, Mark, Tone, Voice};
-use crate::stats::{self, GOOD_SCORE, Outcome, activity_day};
+use crate::stats::{self, DayRecord, OVERRUN_PERCENT, Session, WEEK};
 use crate::ui::format_minutes;
 use crate::ui::kit::{self, skin};
 
-/// How a score reads.
-pub fn score_mark(score: Option<u8>) -> Mark {
-    match score {
-        Some(s) if s >= GOOD_SCORE => Mark::Good,
-        Some(s) if s >= 50 => Mark::Fair,
-        Some(_) => Mark::Poor,
-        None => Mark::Plain,
-    }
-}
+/// English is the source, translated where drawn; Monday first, as chrono
+/// numbers them.
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-/// The height of the tallest bar in the week chart.
-const CHART_HEIGHT: f32 = 112.;
+/// The width of the day names down the left of the week.
+const DAY_COLUMN: Pixels = px(76.);
+/// The width of the "last use" times down the right.
+const LAST_COLUMN: Pixels = px(52.);
+const TRACK_HEIGHT: Pixels = px(18.);
 
 impl MainWindow {
     pub(super) fn render_breaks(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -36,9 +38,8 @@ impl MainWindow {
         v_flex()
             .gap_5()
             .child(self.render_status(c, cx))
-            .child(render_summary(c, cx))
-            .child(render_today(c, cx))
-            .child(render_sessions(c, cx))
+            .child(render_week(c, cx))
+            .child(render_habits(c, cx))
             .into_any_element()
     }
 
@@ -169,240 +170,362 @@ impl MainWindow {
             .child(actions)
             .child(skin(cx).divider(cx))
             .child(cadence)
+            .children(evening_line(c).map(|text| kit::hint(text, cx)))
             .into_any_element()
     }
 }
 
-/// Streak, points and title: what a glance at this page is for.
-fn render_summary(c: &Controller, cx: &App) -> AnyElement {
-    let today = activity_day(now_ts());
-    let streak = c.stats.streak(today, c.today_score());
-    let points = c.stats.total_points();
-    let (level, floor, next) = stats::level(points);
-    let to_next = match next {
-        Some(next) => tr!(
-            n = next - points,
-            "1 point to the next title" | "{n} points to the next title"
-        ),
-        None => tr!("The highest title there is").to_string(),
-    };
-    let fraction = next.map_or(1., |next| (points - floor) as f32 / (next - floor) as f32);
-
-    let tile = |icon: Lucide, caption: &'static str, value: String| {
-        skin(cx)
-            .card(cx)
-            .flex_1()
-            .min_w_0()
-            .gap_1()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(Icon::new(icon).size(px(14.)))
-                    .child(kit::hint(caption, cx)),
+/// Where tonight's cutoff stands, when it is on.
+fn evening_line(c: &Controller) -> Option<String> {
+    let evening = &c.config.evening;
+    if !evening.enabled {
+        return None;
+    }
+    let now = c.evening_now();
+    let at = evening::cutoff_at(stats::day_of(now), evening.cutoff);
+    let time = evening.cutoff.to_string();
+    Some(match c.evening {
+        Status::Cutoff { .. } | Status::KeepingOn { .. } => tr!("Evening cutoff at {time}: it is here.", time = time),
+        _ => {
+            let left = (at - now).num_seconds().max(0) as u64;
+            tr!(
+                "Evening cutoff at {time}, in {left}.",
+                time = time,
+                left = format_minutes(left)
             )
-            .child(div().text_xl().font_weight(skin(cx).weight(Voice::Loud)).child(value))
-    };
-
-    h_flex()
-        .gap_4()
-        .items_start()
-        .child(tile(
-            Lucide::Flame,
-            tr!("Streak"),
-            tr!(n = streak, "1 day" | "{n} days"),
-        ))
-        .child(tile(Lucide::Trophy, tr!("Points"), points.to_string()))
-        .child(
-            tile(Lucide::Activity, tr!("Title"), level.to_string())
-                .child(div().pt_1().child(skin(cx).meter(fraction, Mark::Accent, cx)))
-                .child(kit::hint(to_next, cx)),
-        )
-        .into_any_element()
+        }
+    })
 }
 
-/// Today's score and the week it sits in.
-fn render_today(c: &Controller, cx: &App) -> AnyElement {
-    let t = &c.tracker;
-    let today = activity_day(now_ts());
-    let empty = Default::default();
-    let day = c.stats.day(today).unwrap_or(&empty);
-    let score = c.today_score();
-    let mark = score_mark(score);
+/// A day as a person names it: today, yesterday, or its weekday.
+fn day_name(date: NaiveDate, today: NaiveDate) -> String {
+    if date == today {
+        tr!("Today").to_string()
+    } else if Some(date) == today.pred_opt() {
+        tr!("Yesterday").to_string()
+    } else {
+        translate(WEEKDAYS[date.weekday().num_days_from_monday() as usize]).to_string()
+    }
+}
 
-    let headline = h_flex()
+/// Hours since the start of `day` (05:00), the week's one horizontal scale.
+fn hours_into(day: NaiveDate, at: NaiveDateTime) -> f32 {
+    (at - stats::day_start(day)).num_seconds() as f32 / 3600.
+}
+
+fn hours_of(day: NaiveDate, ts: i64) -> f32 {
+    hours_into(day, stats::local_time(ts))
+}
+
+/// The hours the week's rows show, from the earliest work to the latest use
+/// or cutoff, in whole hours since 05:00. Never under six hours, so a quiet
+/// week is not stretched into a few fat bars.
+pub fn axis(spans: impl IntoIterator<Item = (f32, f32)>) -> (u32, u32) {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for (start, end) in spans {
+        lo = lo.min(start);
+        hi = hi.max(end);
+    }
+    if lo > hi {
+        // Nothing yet: 08:00 to 23:00.
+        return (3, 18);
+    }
+    let lo = lo.floor().clamp(0., 23.) as u32;
+    let hi = (hi.ceil().clamp(1., 24.) as u32).max(lo + 1);
+    if hi - lo >= 6 {
+        (lo, hi)
+    } else {
+        let hi = (lo + 6).min(24);
+        (hi - 6, hi)
+    }
+}
+
+/// One day of the week, in hours since its 05:00.
+struct Row {
+    date: NaiveDate,
+    /// Each stretch of work and whether it ran over.
+    stretches: Vec<(f32, f32, bool)>,
+    cutoff: Option<f32>,
+    last_input: Option<f32>,
+    /// The time of day of the last input, for the right-hand column.
+    last_clock: Option<String>,
+    said: Vec<String>,
+}
+
+fn row(date: NaiveDate, day: &DayRecord, open: Option<&Session>, today: NaiveDate) -> Row {
+    let clock = |ts: i64| stats::local_time(ts).format("%H:%M").to_string();
+    Row {
+        date,
+        stretches: day
+            .sessions_with(open)
+            .map(|s| (hours_of(date, s.start), hours_of(date, s.end), s.overran()))
+            .collect(),
+        cutoff: day
+            .evening
+            .as_ref()
+            .map(|e| hours_into(date, evening::cutoff_at(date, e.cutoff))),
+        last_input: day.last_input.map(|ts| hours_of(date, ts)),
+        // Today's last input is a moment ago; "last use" means once a day is done.
+        last_clock: day.last_input.filter(|_| date != today).map(clock),
+        said: day
+            .evening
+            .iter()
+            .flat_map(|e| &e.extensions)
+            .map(|e| tr!("{time} “{reason}”", time = clock(e.at), reason = e.reason.clone()))
+            .collect(),
+    }
+}
+
+/// The week, a row a day, today on top.
+fn render_week(c: &Controller, cx: &App) -> AnyElement {
+    let now = c.evening_now();
+    let today = stats::day_of(now);
+    let open = c.open_session();
+    let empty = DayRecord::default();
+    let rows: Vec<Row> = (0..WEEK)
+        .filter_map(|ago| today.checked_sub_days(Days::new(ago)))
+        .map(|date| {
+            let day = c.stats.day(date).unwrap_or(&empty);
+            row(date, day, open.as_ref().filter(|_| date == today), today)
+        })
+        .collect();
+    let has_data = rows.iter().any(|r| !r.stretches.is_empty() || r.last_input.is_some());
+
+    let (lo, hi) = axis(rows.iter().flat_map(|r| {
+        let mut spans: Vec<(f32, f32)> = r.stretches.iter().map(|&(a, b, _)| (a, b)).collect();
+        spans.extend(r.cutoff.map(|h| (h, h)));
+        spans.extend(r.last_input.map(|h| (h, h)));
+        spans
+    }));
+    let span = (hi - lo) as f32;
+    let x = move |h: f32| ((h - lo as f32) / span).clamp(0., 1.);
+
+    let step = if hi - lo > 12 { 3 } else { 2 };
+    let ticks = (lo..=hi)
+        .filter(|h| (h + stats::DAY_START_HOUR).is_multiple_of(step))
+        .map(|h| {
+            div()
+                .absolute()
+                .top_0()
+                .left(relative(x(h as f32)))
+                .ml(px(-12.))
+                .w(px(24.))
+                .text_center()
+                .child(kit::hint(format!("{:02}", (h + stats::DAY_START_HOUR) % 24), cx))
+        });
+    let header = h_flex()
         .gap_3()
-        .items_center()
+        .child(div().w(DAY_COLUMN).flex_none())
+        .child(div().flex_1().min_w_0().relative().h(px(16.)).children(ticks))
         .child(
             div()
-                .text_size(px(44.))
-                .line_height(px(48.))
-                .font_weight(skin(cx).weight(Voice::Loud))
-                .text_color(skin(cx).ink(mark, cx))
-                .child(score.map_or("—".to_string(), |s| s.to_string())),
-        )
-        .child(match score {
-            Some(s) => v_flex()
-                .gap_1()
-                .child(h_flex().child(skin(cx).chip(&tr!("Grade {g}", g = stats::grade(s)), mark, cx)))
-                .child(kit::hint(tr!("out of 100"), cx)),
-            None => v_flex().child(kit::hint(tr!("Scoring starts after 15 minutes of use"), cx)),
+                .w(LAST_COLUMN)
+                .flex_none()
+                .text_right()
+                .child(kit::hint(tr!("Last use"), cx)),
+        );
+
+    let skin = skin(cx);
+    let work_fill = skin.fill(Mark::Accent, cx);
+    let over_fill = skin.fill(Mark::Poor, cx);
+    let late_fill = skin.fill(Mark::Fair, cx);
+    let line = cx.theme().foreground.opacity(0.7);
+
+    let lines = rows.iter().map(|r| {
+        let bars = r.stretches.iter().map(|&(a, b, overran)| {
+            let (a, b) = (x(a), x(b));
+            skin.stretch(if overran { Mark::Poor } else { Mark::Accent }, cx)
+                .absolute()
+                .top(px(3.))
+                .bottom(px(3.))
+                .left(relative(a))
+                .w(relative((b - a).max(0.)))
+                .min_w(px(2.))
         });
-
-    let metric = |caption: &'static str, value: String| {
-        v_flex()
-            .flex_1()
-            .min_w(px(110.))
-            .gap_0p5()
-            .child(kit::hint(caption, cx))
-            .child(kit::label(value, cx))
-    };
-    let metrics = h_flex()
-        .gap_4()
-        .flex_wrap()
-        .child(metric(
-            tr!("Screen time"),
-            format_minutes(day.active_secs() + t.session_active()),
-        ))
-        .child(metric(tr!("Breaks"), day.breaks().to_string()))
-        .child(metric(
-            tr!("Longest stretch"),
-            format_minutes(day.longest_secs().max(t.session_active())),
-        ))
-        .child(metric(tr!("Points today"), format!("+{}", day.points())));
-
-    // Oldest first. The height and the number carry the score; the colour only
-    // says whether the day cleared the good line.
-    let bars = h_flex().gap_2().items_end().children((0..7u64).rev().map(|ago| {
-        let date = today.checked_sub_days(Days::new(ago)).unwrap_or(today);
-        let score = if ago == 0 {
-            c.today_score()
-        } else {
-            c.stats.day(date).and_then(|d| d.score())
-        };
-        let height = score.map_or(8., |s| (s as f32 / 100. * CHART_HEIGHT).max(8.));
-        let mark = match score {
-            Some(s) if s >= GOOD_SCORE => Mark::Good,
-            Some(_) => Mark::Fair,
-            None => Mark::Plain,
-        };
-        v_flex()
+        let late = r
+            .cutoff
+            .zip(r.last_input)
+            .filter(|(cutoff, last)| last > cutoff)
+            .map(|(cutoff, last)| {
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .h(px(3.))
+                    .left(relative(x(cutoff)))
+                    .w(relative((x(last) - x(cutoff)).max(0.)))
+                    .bg(late_fill)
+            });
+        let cutoff = r.cutoff.map(|h| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(relative(x(h)))
+                .w(px(2.))
+                .bg(line)
+        });
+        let track = div()
             .flex_1()
             .min_w_0()
-            .items_center()
-            .gap_1()
-            .child(kit::hint(score.map(|s| s.to_string()).unwrap_or_default(), cx))
-            .child(skin(cx).bar(mark, px(height), cx))
-            .child(kit::hint(
-                if ago == 0 {
-                    tr!("Today").to_string()
-                } else {
-                    date.format("%m/%d").to_string()
-                },
-                cx,
-            ))
-    }));
-    let legend = |mark: Mark, text: String| {
+            .relative()
+            .h(TRACK_HEIGHT)
+            .rounded(px(3.))
+            .bg(cx.theme().muted)
+            .children(bars)
+            .children(late)
+            .children(cutoff);
+        v_flex()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(DAY_COLUMN)
+                            .flex_none()
+                            .child(kit::label(day_name(r.date, today), cx).text_xs()),
+                    )
+                    .child(track)
+                    .child(
+                        div()
+                            .w(LAST_COLUMN)
+                            .flex_none()
+                            .text_right()
+                            .child(kit::hint(r.last_clock.clone().unwrap_or_default(), cx)),
+                    ),
+            )
+            .when(!r.said.is_empty(), |el| {
+                el.child(
+                    div()
+                        .pl(DAY_COLUMN + px(12.))
+                        .pr(LAST_COLUMN + px(12.))
+                        .child(kit::hint(tr!("Carried on: {said}", said = r.said.join(" · ")), cx)),
+                )
+            })
+    });
+
+    let legend = |fill: Hsla, text: String| {
         h_flex()
             .gap_1p5()
             .items_center()
-            .child(skin(cx).swatch(skin(cx).fill(mark, cx), cx))
+            .child(skin.swatch(fill, cx))
             .child(kit::hint(text, cx))
     };
+    let limit = c.config.breaks.work_minutes as u64 * OVERRUN_PERCENT / 100 * 60;
 
-    skin(cx)
-        .card(cx)
-        .gap_4()
-        .child(skin(cx).eyebrow(tr!("Today"), cx))
-        .child(headline)
-        .child(metrics)
-        .child(skin(cx).divider(cx))
-        .child(skin(cx).eyebrow(tr!("Last 7 days"), cx))
-        .child(div().h(px(CHART_HEIGHT + 44.)).flex().items_end().child(bars.w_full()))
+    skin.card(cx)
+        .id("week")
+        .test_support()
+        .gap_3()
+        .child(skin.eyebrow(tr!("This week"), cx))
+        .when(!has_data, |el| {
+            el.child(kit::hint(tr!("The week fills in as you use the computer."), cx))
+        })
+        .child(header)
+        .children(lines)
         .child(
             h_flex()
                 .gap_4()
                 .flex_wrap()
-                .child(legend(Mark::Good, tr!("Good ({n}+)", n = GOOD_SCORE)))
-                .child(legend(Mark::Fair, tr!("Below {n}", n = GOOD_SCORE)))
-                .child(legend(Mark::Plain, tr!("No data").to_string())),
+                .child(legend(work_fill, tr!("Work stretch").to_string()))
+                .child(legend(over_fill, tr!("Over {time}", time = format_minutes(limit))))
+                .child(legend(line, tr!("Evening cutoff").to_string()))
+                .child(legend(late_fill, tr!("Use after the cutoff").to_string())),
         )
-        .child(kit::hint(
-            tr!(
-                "A session scores full marks up to 110% of {work} minutes and loses more the longer it runs past that. {rest} minutes away from the computer counts as a break.",
-                work = c.config.breaks.work_minutes,
-                rest = c.config.breaks.break_minutes
-            ),
-            cx,
-        ))
         .into_any_element()
 }
 
-/// Every session that ended today, newest first.
-fn render_sessions(c: &Controller, cx: &App) -> AnyElement {
-    let today = activity_day(now_ts());
-    let empty = Default::default();
-    let day = c.stats.day(today).unwrap_or(&empty);
-    let clock = |ts: i64| {
-        Local
-            .timestamp_opt(ts, 0)
-            .single()
-            .map(|d| d.format("%H:%M").to_string())
-            .unwrap_or_default()
+/// The two habits, each said as a plain fact about the week.
+fn render_habits(c: &Controller, cx: &App) -> AnyElement {
+    let now = c.evening_now();
+    let today = stats::day_of(now);
+    let open = c.open_session();
+    let habits = c.stats.habits(today, now, open.as_ref());
+    let limit = c.config.breaks.work_minutes as u64 * OVERRUN_PERCENT / 100 * 60;
+
+    let mut rhythm = if habits.rhythm.of == 0 {
+        tr!("Nothing to count yet: a day counts once it has 15 minutes of work.").to_string()
+    } else {
+        tr!(
+            n = habits.rhythm.of,
+            "Of 1 day at the computer this week, {kept} had no stretch of work over {limit}."
+                | "Of {n} days at the computer this week, {kept} had no stretch of work over {limit}.",
+            kept = habits.rhythm.kept,
+            limit = format_minutes(limit)
+        )
     };
-    let rows = day.sessions.iter().rev().map(|s| {
-        let score = s.score();
+    if let Some((date, secs)) = habits.longest {
+        rhythm.push(' ');
+        let time = format_minutes(secs);
+        rhythm.push_str(&if date == today {
+            tr!("The longest stretch was {time}, today.", time = time)
+        } else if Some(date) == today.pred_opt() {
+            tr!("The longest stretch was {time}, yesterday.", time = time)
+        } else {
+            tr!(
+                "The longest stretch was {time}, on {day}.",
+                time = time,
+                day = day_name(date, today)
+            )
+        });
+    }
+
+    let evening = &c.config.evening;
+    let evenings = if habits.evenings.of > 0 {
+        tr!(
+            n = habits.evenings.of,
+            "You stopped in time on {kept} of 1 evening this week."
+                | "You stopped in time on {kept} of {n} evenings this week.",
+            kept = habits.evenings.kept
+        )
+    } else if evening.enabled {
+        tr!(
+            "No evening to count yet. Tonight counts once {time} has passed.",
+            time = evening.cutoff.to_string()
+        )
+    } else {
+        tr!("Off. Turn it on in Settings, and your evenings show up here.").to_string()
+    };
+
+    let habit = |icon: Lucide, name: &'static str, text: String| {
         h_flex()
             .gap_3()
-            .items_center()
-            .min_h(px(28.))
+            .items_start()
             .child(
                 div()
-                    .w(px(104.))
-                    .flex_none()
-                    .child(kit::body(format!("{} – {}", clock(s.start), clock(s.end)), cx)),
+                    .pt_0p5()
+                    .child(Icon::new(icon).size(px(16.)).text_color(cx.theme().muted_foreground)),
             )
             .child(
-                div()
-                    .w(px(88.))
-                    .flex_none()
-                    .child(kit::body(format_minutes(s.active_secs), cx)),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(kit::label(name, cx))
+                    .child(kit::body(text, cx)),
             )
-            .child(div().flex_1().min_w_0().child(kit::hint(
-                match s.kind {
-                    BreakKind::Natural => tr!("Stepped away"),
-                    BreakKind::Prompted => tr!("Reminded"),
-                },
-                cx,
-            )))
-            .child(skin(cx).chip(&score.to_string(), score_mark(Some(score)), cx))
-    });
-    let (skips, snoozes, ignored) = (
-        day.count(Outcome::Skipped),
-        day.count(Outcome::Snoozed),
-        day.count(Outcome::Ignored),
-    );
-    let tally = (skips + snoozes + ignored > 0).then(|| {
-        kit::hint(
-            tr!(
-                "Today: {skipped} skipped, {snoozed} snoozed, {ignored} ignored",
-                skipped = skips,
-                snoozed = snoozes,
-                ignored = ignored
-            ),
-            cx,
-        )
-    });
+    };
 
     skin(cx)
         .card(cx)
-        .gap_2()
-        .child(skin(cx).eyebrow(tr!("Sessions today"), cx))
-        .when(day.sessions.is_empty(), |el| {
-            el.child(kit::hint(tr!("No session has ended yet today."), cx))
-        })
-        .children(rows)
-        .children(tally)
+        .gap_4()
+        .child(skin(cx).eyebrow(tr!("Habits"), cx))
+        .child(habit(Lucide::Timer, tr!("Break rhythm"), rhythm))
+        .child(habit(Lucide::Moon, tr!("Evening cutoff"), evenings))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::axis;
+
+    #[test]
+    fn the_week_spans_from_its_first_work_to_its_last_use() {
+        assert_eq!(axis([(3.5, 6.0), (4.0, 16.2)]), (3, 17));
+        assert_eq!(axis([]), (3, 18), "an empty week shows a plain day");
+        assert_eq!(axis([(10.0, 11.0)]), (10, 16), "never narrower than six hours");
+        assert_eq!(axis([(20.0, 23.5)]), (18, 24), "nor past the end of the day");
+        assert_eq!(axis([(-1.0, 30.0)]), (0, 24), "nor outside it");
+    }
 }

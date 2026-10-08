@@ -181,8 +181,8 @@ pub trait SkinStyle: Sync + 'static {
     /// The colour a status word or number is drawn in.
     fn ink(&self, mark: Mark, cx: &App) -> Hsla;
 
-    /// One bar of a chart.
-    fn bar(&self, mark: Mark, height: Pixels, cx: &App) -> Div;
+    /// One stretch on a timeline. The caller places and sizes it.
+    fn stretch(&self, mark: Mark, cx: &App) -> Div;
 
     /// A horizontal progress meter, `fraction` full (clamped to 0..=1).
     fn meter(&self, fraction: f32, mark: Mark, cx: &App) -> Div;

@@ -1,8 +1,8 @@
-//! Screen-time history and scoring. Pure logic plus JSON (de)serialisation.
+//! Screen-time history: what happened each day, and the plain facts the Breaks
+//! page draws from it. Pure logic plus JSON (de)serialisation.
 //!
-//! Scoring is passive: every work session is graded by how close it stayed to
-//! the target interval. A day's score is the activity-weighted average of its
-//! sessions, so a single 3-hour marathon hurts more than a short overrun.
+//! Nothing here is a score. A day is not graded; it either kept to the rhythm
+//! the user chose or it did not, and the page says which, and how often.
 
 use std::collections::BTreeMap;
 
@@ -11,13 +11,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::breaks::{BreakKind, EndedSession};
 use crate::evening::{self, ClockTime};
-use crate::i18n::translate;
 
-/// Sessions shorter than this don't earn points (but still count for time).
-const MIN_REWARDED_SECS: u64 = 10 * 60;
-/// Days with less activity than this don't get a score.
-const MIN_SCORED_SECS: u64 = 15 * 60;
-pub const GOOD_SCORE: u8 = 80;
+/// Days with less use than this are left out of the habits: a quick look at
+/// the computer is not a day at it.
+const MIN_COUNTED_SECS: u64 = 15 * 60;
+/// A stretch of work longer than this share of the target ran over. With the
+/// default 50 minutes that is 75: past one or two put-off reminders, which is
+/// what finishing what you were doing takes, and into a second one ignored.
+/// A share rather than a number of minutes, so it follows the user's target.
+pub const OVERRUN_PERCENT: u64 = 150;
+/// How many days the habits look back over, today included.
+pub const WEEK: u64 = 7;
 /// A day starts at this hour rather than at midnight. Past midnight is still
 /// the evening before, as far as anyone's sense of "a day" goes; and the
 /// evening cutoff ends here, so a night is never split across two days.
@@ -78,20 +82,9 @@ impl From<EndedSession> for Session {
 }
 
 impl Session {
-    pub fn score(&self) -> u8 {
-        session_score(self.active_secs, self.target_secs)
-    }
-
-    pub fn points(&self) -> u32 {
-        if self.active_secs < MIN_REWARDED_SECS {
-            return 0;
-        }
-        match self.score() {
-            s if s >= 95 => 10,
-            s if s >= GOOD_SCORE => 6,
-            s if s >= 50 => 2,
-            _ => 0,
-        }
+    /// Whether this stretch ran well past its target; see [`OVERRUN_PERCENT`].
+    pub fn overran(&self) -> bool {
+        self.target_secs > 0 && self.active_secs * 100 > self.target_secs * OVERRUN_PERCENT
     }
 }
 
@@ -209,42 +202,45 @@ impl DayRecord {
         )
     }
 
-    /// How many of the day's reminders ended this way.
-    pub fn count(&self, outcome: Outcome) -> usize {
-        self.reminders.iter().filter(|r| r.outcome == outcome).count()
+    /// The day's sessions, with `open` — a stretch still running — after them.
+    pub fn sessions_with<'a>(&'a self, open: Option<&'a Session>) -> impl Iterator<Item = &'a Session> {
+        self.sessions.iter().chain(open)
     }
 
-    pub fn active_secs(&self) -> u64 {
-        self.sessions.iter().map(|s| s.active_secs).sum()
+    /// Whether the day had enough use to count toward the habits.
+    pub fn counts(&self, open: Option<&Session>) -> bool {
+        self.sessions_with(open).map(|s| s.active_secs).sum::<u64>() >= MIN_COUNTED_SECS
     }
 
-    pub fn breaks(&self) -> usize {
-        self.sessions.len()
+    /// Whether no stretch of the day ran over.
+    pub fn kept_rhythm(&self, open: Option<&Session>) -> bool {
+        !self.sessions_with(open).any(Session::overran)
     }
+}
 
-    pub fn longest_secs(&self) -> u64 {
-        self.sessions.iter().map(|s| s.active_secs).max().unwrap_or(0)
-    }
+/// So many days out of so many.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub kept: u32,
+    pub of: u32,
+}
 
-    pub fn points(&self) -> u32 {
-        self.sessions.iter().map(Session::points).sum()
+impl Tally {
+    fn add(&mut self, kept: bool) {
+        self.of += 1;
+        self.kept += u32::from(kept);
     }
+}
 
-    /// Score including an optional still-running session `(active, target)`.
-    pub fn score_with(&self, open: Option<(u64, u64)>) -> Option<u8> {
-        let mut weighted = 0f64;
-        let mut total = 0u64;
-        let parts = self.sessions.iter().map(|s| (s.active_secs, s.target_secs)).chain(open);
-        for (active, target) in parts {
-            weighted += session_score(active, target) as f64 * active as f64;
-            total += active;
-        }
-        (total >= MIN_SCORED_SECS).then(|| (weighted / total as f64).round() as u8)
-    }
-
-    pub fn score(&self) -> Option<u8> {
-        self.score_with(None)
-    }
+/// The two habits over the last [`WEEK`] days.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Habits {
+    /// Days without a stretch that ran over, of the days that counted.
+    pub rhythm: Tally,
+    /// The longest stretch of the week: its day and its length.
+    pub longest: Option<(NaiveDate, u64)>,
+    /// Evenings stopped in time, of the evenings the cutoff was on and over.
+    pub evenings: Tally,
 }
 
 /// The shape `stats.json` is written in. Version 1 had no number, kept days
@@ -307,70 +303,37 @@ impl Stats {
         self.day_mut(date).sessions.push(session);
     }
 
-    pub fn total_points(&self) -> u32 {
-        self.days.values().map(DayRecord::points).sum()
-    }
-
-    /// Consecutive days with a good score, ending at `today` (today only
-    /// counts once it already qualifies, so the streak isn't broken early).
-    pub fn streak(&self, today: NaiveDate, today_score: Option<u8>) -> u32 {
-        let good = |s: Option<u8>| s.is_some_and(|s| s >= GOOD_SCORE);
-        let mut streak = u32::from(good(today_score));
-        let mut date = today;
-        while let Some(prev) = date.checked_sub_days(Days::new(1)) {
-            match self.days.get(&prev) {
-                Some(day) if good(day.score()) => streak += 1,
-                // Days without any computer use don't break a streak.
-                None => {
-                    if self.days.keys().next().is_none_or(|first| prev < *first) {
-                        break;
-                    }
-                }
-                Some(day) if day.score().is_none() => {}
-                Some(_) => break,
+    /// The habits over the week ending `today`, at local time `now`, with
+    /// `open` the stretch still running.
+    ///
+    /// Tonight counts once its cutoff and the few minutes' grace after it have
+    /// passed: before then, there is nothing yet to have kept.
+    pub fn habits(&self, today: NaiveDate, now: NaiveDateTime, open: Option<&Session>) -> Habits {
+        let mut habits = Habits::default();
+        for ago in (0..WEEK).rev() {
+            let Some(date) = today.checked_sub_days(Days::new(ago)) else {
+                continue;
+            };
+            let open = if ago == 0 { open } else { None };
+            let empty = DayRecord::default();
+            let day = self.days.get(&date).unwrap_or(&empty);
+            if day.counts(open) {
+                habits.rhythm.add(day.kept_rhythm(open));
             }
-            date = prev;
+            if let Some(longest) = day.sessions_with(open).map(|s| s.active_secs).max()
+                && habits.longest.is_none_or(|(_, secs)| longest > secs)
+            {
+                habits.longest = Some((date, longest));
+            }
+            if let Some(record) = &day.evening {
+                let over = evening::cutoff_at(date, record.cutoff) + evening::WRAP_UP_GRACE;
+                if ago > 0 || now >= over {
+                    habits.evenings.add(day.stopped_in_time(date) == Some(true));
+                }
+            }
         }
-        streak
+        habits
     }
-}
-
-/// 100 while within 110% of the target, then falling to 0 at 190%.
-pub fn session_score(active_secs: u64, target_secs: u64) -> u8 {
-    if target_secs == 0 {
-        return 100;
-    }
-    let ratio = active_secs as f64 / target_secs as f64;
-    let score = 100.0 - (ratio - 1.1).max(0.0) * 125.0;
-    score.clamp(0.0, 100.0).round() as u8
-}
-
-pub fn grade(score: u8) -> &'static str {
-    match score {
-        95.. => "S",
-        85.. => "A",
-        70.. => "B",
-        50.. => "C",
-        _ => "D",
-    }
-}
-
-/// Title for the accumulated points, a small long-term motivator.
-///
-/// The English name is the source; `level` translates it on the way out, which
-/// a `const` table cannot do for itself.
-pub fn level(points: u32) -> (&'static str, u32, Option<u32>) {
-    const LEVELS: &[(u32, &str)] = &[
-        (0, "Sedentary starter"),
-        (100, "Stretch apprentice"),
-        (300, "Pacing pro"),
-        (800, "Eye guardian"),
-        (2000, "Health pro"),
-        (5000, "Tarsier grandmaster"),
-    ];
-    let idx = LEVELS.iter().rposition(|(min, _)| points >= *min).unwrap_or(0);
-    let next = LEVELS.get(idx + 1).map(|(min, _)| *min);
-    (translate(LEVELS[idx].1), LEVELS[idx].0, next)
 }
 
 #[cfg(test)]
@@ -410,62 +373,58 @@ mod tests {
     }
 
     #[test]
-    fn session_score_curve() {
-        assert_eq!(session_score(50 * 60, 50 * 60), 100);
-        assert_eq!(session_score(55 * 60, 50 * 60), 100);
-        assert_eq!(session_score(75 * 60, 50 * 60), 50);
-        assert_eq!(session_score(200 * 60, 50 * 60), 0);
-        assert_eq!(session_score(10, 0), 100);
+    fn a_stretch_runs_over_past_half_again_its_target() {
+        assert!(!session(50, 50).overran());
+        assert!(!session(75, 50).overran(), "one or two put-off reminders");
+        assert!(session(76, 50).overran());
+        assert!(!session(76, 0).overran(), "no target, nothing to run past");
     }
 
     #[test]
-    fn day_score_is_activity_weighted() {
+    fn a_short_day_does_not_count_and_one_marathon_breaks_the_rhythm() {
         let mut day = DayRecord::default();
-        day.sessions.push(session(50, 50)); // 100
-        day.sessions.push(session(150, 50)); // 0
-        assert_eq!(day.score(), Some(25));
-        assert_eq!(day.longest_secs(), 150 * 60);
+        day.sessions.push(session(10, 50));
+        assert!(!day.counts(None), "ten minutes is a look, not a day");
+        let open = session(10, 50);
+        assert!(day.counts(Some(&open)), "the stretch still running counts too");
+        day.sessions.push(session(48, 50));
+        assert!(day.kept_rhythm(None));
+        day.sessions.push(session(180, 50));
+        assert!(!day.kept_rhythm(None));
     }
 
     #[test]
-    fn tiny_days_are_unscored() {
-        let mut day = DayRecord::default();
-        day.sessions.push(session(5, 50));
-        assert_eq!(day.score(), None);
-        assert_eq!(day.score_with(Some((20 * 60, 50 * 60))), Some(100));
-    }
-
-    #[test]
-    fn points_reward_good_breaks() {
-        assert_eq!(session(45, 50).points(), 10);
-        assert_eq!(session(5, 50).points(), 0);
-        assert_eq!(session(60, 50).points(), 6);
-        assert_eq!(session(75, 50).points(), 2);
-        assert_eq!(session(120, 50).points(), 0);
-    }
-
-    #[test]
-    fn streak_counts_good_days_and_skips_empty_ones() {
+    fn a_week_of_habits() {
         let mut stats = Stats::default();
-        stats.record(date(1), session(40, 50));
-        stats.record(date(2), session(200, 50)); // bad
-        stats.record(date(3), session(40, 50));
-        // date(4) missing: weekend, no usage
-        stats.record(date(5), session(40, 50));
-        assert_eq!(stats.streak(date(6), None), 2);
-        assert_eq!(stats.streak(date(6), Some(90)), 3);
-        assert_eq!(stats.streak(date(1), Some(90)), 1);
-    }
+        // The 2nd and 3rd are a week and more ago; the rest are in it.
+        stats.record(date(1), session(300, 50));
+        stats.record(date(3), session(60, 50));
+        stats.record(date(4), session(94, 50));
+        stats.record(date(5), session(5, 50));
+        stats.record(date(6), session(45, 50));
+        let nine = ClockTime::new(21, 0);
+        for d in [6, 7] {
+            let day = stats.day_mut(date(d));
+            day.follow_cutoff(date(d), nine, at(d, 9, 0));
+        }
+        stats.day_mut(date(6)).saw_input(ts(at(6, 20, 50)));
+        stats.day_mut(date(7)).saw_input(ts(at(7, 23, 30)));
+        stats.day_mut(date(9)).follow_cutoff(date(9), nine, at(9, 9, 0));
 
-    #[test]
-    fn grades_and_levels() {
-        assert_eq!(grade(100), "S");
-        assert_eq!(grade(60), "C");
-        // Titles read in the language the UI is drawn in; English is the
-        // default and the source, so this is what an untranslated run shows.
-        assert_eq!(level(0), ("Sedentary starter", 0, Some(100)));
-        assert_eq!(level(350).0, "Pacing pro");
-        assert_eq!(level(9999).2, None);
+        let open = session(30, 50);
+        let habits = stats.habits(date(9), at(9, 20, 0), Some(&open));
+        // 3rd (60 of 50: fine), 4th (94: over), 6th (45), today (30 so far);
+        // the 5th had five minutes, and the 1st is out of the week.
+        assert_eq!(habits.rhythm, Tally { kept: 3, of: 4 });
+        assert_eq!(habits.longest, Some((date(4), 94 * 60)));
+        // The 6th stopped in time, the 7th did not, and tonight is not over.
+        assert_eq!(habits.evenings, Tally { kept: 1, of: 2 });
+        let later = stats.habits(date(9), at(9, 21, 10), Some(&open));
+        assert_eq!(
+            later.evenings,
+            Tally { kept: 2, of: 3 },
+            "no input after the cutoff tonight"
+        );
     }
 
     #[test]

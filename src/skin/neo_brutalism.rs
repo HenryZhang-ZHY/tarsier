@@ -337,12 +337,11 @@ impl SkinStyle for NeoBrutalism {
         color(INK)
     }
 
-    fn bar(&self, mark: Mark, height: Pixels, cx: &App) -> Div {
+    fn stretch(&self, mark: Mark, cx: &App) -> Div {
+        // A hairline, not the 2px stroke: a stretch may be only a few pixels wide.
         div()
-            .w_full()
-            .h(height)
-            .rounded_t(px(3.))
-            .border(STROKE)
+            .rounded(px(2.))
+            .border_1()
             .border_color(color(INK))
             .bg(self.fill(mark, cx))
     }

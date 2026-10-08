@@ -153,8 +153,8 @@ impl SkinStyle for Native {
         }
     }
 
-    fn bar(&self, mark: Mark, height: Pixels, cx: &App) -> Div {
-        div().w_full().h(height).rounded_t(px(4.)).bg(self.fill(mark, cx))
+    fn stretch(&self, mark: Mark, cx: &App) -> Div {
+        div().rounded(px(2.)).bg(self.fill(mark, cx))
     }
 
     fn meter(&self, fraction: f32, mark: Mark, cx: &App) -> Div {

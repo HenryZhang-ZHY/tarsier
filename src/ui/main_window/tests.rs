@@ -455,3 +455,72 @@ fn setting_the_evening_cutoff(cx: &mut TestAppContext) {
     });
     assert_eq!(ui.config(cx).evening.cutoff.to_string(), "21:30");
 }
+
+/// A week of use: stretches every day, one of them long, evenings past the
+/// cutoff with something said, and today still going.
+fn a_week(ui: &Ui, cx: &mut TestAppContext) {
+    use chrono::{Days, Local, TimeZone};
+
+    use crate::breaks::BreakKind;
+    use crate::evening::ClockTime;
+    use crate::stats::{self, EveningRecord, Extension, Session};
+
+    cx.update(|cx| {
+        ui.controller.update(cx, |c, _| {
+            c.config.evening.enabled = true;
+            let today = stats::day_of(stats::local_time(crate::controller::now_ts()));
+            for ago in 0..7u64 {
+                let day = today.checked_sub_days(Days::new(ago)).unwrap();
+                let at = |h: u32, m: u32| {
+                    let local = stats::day_start(day) + chrono::TimeDelta::minutes((h * 60 + m) as i64);
+                    Local.from_local_datetime(&local).earliest().unwrap().timestamp()
+                };
+                let record = c.stats.day_mut(day);
+                for (start, mins) in [(4u32, 50u64), (5, 45), (8, if ago == 2 { 140 } else { 55 })] {
+                    record.sessions.push(Session {
+                        start: at(start, 0),
+                        end: at(start, mins as u32),
+                        active_secs: mins * 60,
+                        target_secs: 50 * 60,
+                        kind: BreakKind::Prompted,
+                    });
+                }
+                record.saw_input(at(4, 0));
+                record.saw_input(at(16 + (ago as u32 % 3), 40));
+                record.evening = Some(EveningRecord {
+                    cutoff: ClockTime::new(21, 0).unwrap(),
+                    extensions: if ago % 2 == 1 {
+                        vec![Extension {
+                            at: at(16, 5),
+                            reason: "finish the release notes and push the tag before the build machine goes to sleep"
+                                .into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                });
+            }
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn a_full_week_fits_the_breaks_page(cx: &mut TestAppContext) {
+    for skin in Skin::ALL {
+        for language in Language::ALL {
+            let ui = open_with(cx, skin, language, NARROW);
+            a_week(&ui, cx);
+            ui.go(cx, Tab::Breaks, None);
+            ui.frame(cx, |window, _| {
+                let width = window.viewport_size().width;
+                let week = window.find("week").bounds();
+                assert!(
+                    week.right() <= width + px(0.5) && week.left() >= px(0.),
+                    "{skin:?}/{language:?}: the week spans {:?}..{:?} in a {width:?} window",
+                    week.left(),
+                    week.right()
+                );
+            });
+        }
+    }
+}

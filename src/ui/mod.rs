@@ -16,20 +16,17 @@ use crate::i18n::tr;
 icon_assets!(
     ExtraIcons,
     [
-        Activity,
         ArrowLeftRight,
         Bug,
         ClipboardPaste,
         Coffee,
         Contrast,
-        Flame,
         Monitor,
         Moon,
         RefreshCw,
         Sun,
         Sunset,
         Timer,
-        Trophy,
     ]
 );
 
