@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Days, NaiveDate};
+use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::breaks::{BreakKind, EndedSession};
@@ -17,6 +17,38 @@ const MIN_REWARDED_SECS: u64 = 10 * 60;
 /// Days with less activity than this don't get a score.
 const MIN_SCORED_SECS: u64 = 15 * 60;
 pub const GOOD_SCORE: u8 = 80;
+/// A day starts at this hour rather than at midnight. Past midnight is still
+/// the evening before, as far as anyone's sense of "a day" goes; and the
+/// evening cutoff ends here, so a night is never split across two days.
+pub const DAY_START_HOUR: u32 = 5;
+
+/// The day a local moment belongs to: before 05:00 it is the day before.
+pub fn day_of(at: NaiveDateTime) -> NaiveDate {
+    let date = at.date();
+    if at.time() < day_start_time() {
+        date.pred_opt().unwrap_or(date)
+    } else {
+        date
+    }
+}
+
+fn day_start_time() -> NaiveTime {
+    NaiveTime::from_hms_opt(DAY_START_HOUR, 0, 0).expect("a valid hour")
+}
+
+/// A Unix timestamp in local time.
+pub fn local_time(ts: i64) -> NaiveDateTime {
+    Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .map(|d: DateTime<Local>| d.naive_local())
+        .unwrap_or_default()
+}
+
+/// The day a Unix timestamp belongs to, in local time.
+pub fn activity_day(ts: i64) -> NaiveDate {
+    day_of(local_time(ts))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
@@ -206,6 +238,23 @@ mod tests {
 
     fn date(d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
+    }
+
+    fn at(d: u32, h: u32, m: u32) -> NaiveDateTime {
+        date(d).and_hms_opt(h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn a_day_runs_from_five_in_the_morning_to_five_the_next() {
+        assert_eq!(day_of(at(8, 5, 0)), date(8));
+        assert_eq!(day_of(at(8, 23, 59)), date(8));
+        assert_eq!(
+            day_of(at(9, 0, 30)),
+            date(8),
+            "past midnight is still the evening before"
+        );
+        assert_eq!(day_of(at(9, 4, 59)), date(8));
+        assert_eq!(day_of(at(9, 5, 0)), date(9));
     }
 
     #[test]

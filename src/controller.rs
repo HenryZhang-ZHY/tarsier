@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::Local;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 
@@ -18,7 +18,7 @@ use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
 use crate::i18n::{self, Language, tr};
 use crate::platform;
-use crate::stats::{Session, Stats};
+use crate::stats::{Session, Stats, activity_day};
 use crate::tray;
 use crate::ui::break_overlay::{BreakOverlay, FADE_OUT};
 use crate::ui::switch_hud::{self, SwitchHud};
@@ -118,14 +118,6 @@ pub fn flip_destination(pair: [u8; 2], current: Option<u8>) -> Option<u8> {
         Some(port) if port == pair[1] => Some(pair[0]),
         _ => None,
     }
-}
-
-pub fn local_date(ts: i64) -> NaiveDate {
-    Local
-        .timestamp_opt(ts, 0)
-        .single()
-        .map(|d: DateTime<Local>| d.date_naive())
-        .unwrap_or_default()
 }
 
 /// Where the controller keeps what it owns between runs.
@@ -681,12 +673,12 @@ impl Controller {
                 BreakEvent::PromptBreak => self.open_overlays(cx),
                 BreakEvent::BreakFinished => self.close_overlays(cx),
                 BreakEvent::BreakIgnored => {
-                    self.stats.day_mut(local_date(now)).ignored += 1;
+                    self.stats.day_mut(activity_day(now)).ignored += 1;
                     self.stats_dirty = true;
                     self.close_overlays(cx);
                 }
                 BreakEvent::SessionEnded(session) => {
-                    self.stats.record(local_date(session.end), Session::from(session));
+                    self.stats.record(activity_day(session.end), Session::from(session));
                     self.stats_dirty = true;
                 }
                 BreakEvent::Returned => {}
@@ -722,7 +714,7 @@ impl Controller {
 
     pub fn snooze(&mut self, cx: &mut Context<Self>) {
         self.tracker.snooze();
-        self.stats.day_mut(local_date(now_ts())).snoozes += 1;
+        self.stats.day_mut(activity_day(now_ts())).snoozes += 1;
         self.stats_dirty = true;
         self.close_overlays(cx);
         cx.notify();
@@ -730,7 +722,7 @@ impl Controller {
 
     pub fn skip(&mut self, cx: &mut Context<Self>) {
         self.tracker.skip();
-        self.stats.day_mut(local_date(now_ts())).skips += 1;
+        self.stats.day_mut(activity_day(now_ts())).skips += 1;
         self.stats_dirty = true;
         self.close_overlays(cx);
         cx.notify();
@@ -747,7 +739,7 @@ impl Controller {
 
     /// Today's score including the running session.
     pub fn today_score(&self) -> Option<u8> {
-        let today = local_date(now_ts());
+        let today = activity_day(now_ts());
         let open = match self.tracker.phase() {
             Phase::Away => None,
             _ => Some((self.tracker.session_active(), self.tracker.settings().work_secs)),
@@ -974,7 +966,7 @@ impl Controller {
     pub fn shutdown(&mut self) {
         let now = now_ts();
         if let Some(session) = self.tracker.finish(now) {
-            self.stats.record(local_date(now), Session::from(session));
+            self.stats.record(activity_day(now), Session::from(session));
         }
         self.save_stats();
     }

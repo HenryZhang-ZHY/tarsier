@@ -10,10 +10,10 @@ use gpui_kit::*;
 
 use super::{MainWindow, Section};
 use crate::breaks::{BreakKind, Phase};
-use crate::controller::{Controller, local_date, now_ts};
+use crate::controller::{Controller, now_ts};
 use crate::i18n::tr;
 use crate::skin::{Control, Mark, Tone, Voice};
-use crate::stats::{self, GOOD_SCORE};
+use crate::stats::{self, GOOD_SCORE, activity_day};
 use crate::ui::format_minutes;
 use crate::ui::kit::{self, skin};
 
@@ -175,7 +175,7 @@ impl MainWindow {
 
 /// Streak, points and title: what a glance at this page is for.
 fn render_summary(c: &Controller, cx: &App) -> AnyElement {
-    let today = local_date(now_ts());
+    let today = activity_day(now_ts());
     let streak = c.stats.streak(today, c.today_score());
     let points = c.stats.total_points();
     let (level, floor, next) = stats::level(points);
@@ -225,7 +225,7 @@ fn render_summary(c: &Controller, cx: &App) -> AnyElement {
 /// Today's score and the week it sits in.
 fn render_today(c: &Controller, cx: &App) -> AnyElement {
     let t = &c.tracker;
-    let today = local_date(now_ts());
+    let today = activity_day(now_ts());
     let empty = Default::default();
     let day = c.stats.day(today).unwrap_or(&empty);
     let score = c.today_score();
@@ -341,7 +341,7 @@ fn render_today(c: &Controller, cx: &App) -> AnyElement {
 
 /// Every session that ended today, newest first.
 fn render_sessions(c: &Controller, cx: &App) -> AnyElement {
-    let today = local_date(now_ts());
+    let today = activity_day(now_ts());
     let empty = Default::default();
     let day = c.stats.day(today).unwrap_or(&empty);
     let clock = |ts: i64| {
