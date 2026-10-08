@@ -32,6 +32,11 @@ pub fn day_of(at: NaiveDateTime) -> NaiveDate {
     }
 }
 
+/// When `day` begins, in local time.
+pub fn day_start(day: NaiveDate) -> NaiveDateTime {
+    day.and_time(day_start_time())
+}
+
 fn day_start_time() -> NaiveTime {
     NaiveTime::from_hms_opt(DAY_START_HOUR, 0, 0).expect("a valid hour")
 }
@@ -337,6 +342,7 @@ mod tests {
         );
         assert_eq!(day_of(at(9, 4, 59)), date(8));
         assert_eq!(day_of(at(9, 5, 0)), date(9));
+        assert_eq!(day_start(date(8)), at(8, 5, 0));
     }
 
     #[test]
