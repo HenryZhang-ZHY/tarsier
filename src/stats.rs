@@ -89,20 +89,62 @@ impl Session {
     }
 }
 
+/// What became of a break reminder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// The user stepped away until the break was over.
+    Rested,
+    Snoozed,
+    Skipped,
+    /// Worked straight through it until it faded away.
+    Ignored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reminder {
+    pub at: i64,
+    pub outcome: Outcome,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayRecord {
+    /// The first and last keyboard or mouse input of the day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_input: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input: Option<i64>,
     #[serde(default)]
     pub sessions: Vec<Session>,
     #[serde(default)]
-    pub skips: u32,
-    #[serde(default)]
-    pub snoozes: u32,
-    /// Reminders worked straight through without resting.
-    #[serde(default)]
-    pub ignored: u32,
+    pub reminders: Vec<Reminder>,
 }
 
 impl DayRecord {
+    /// Notes input at `ts`. True when the record changed enough to be worth
+    /// saving: the day's first input, or a later minute than the last one.
+    /// Saving every second would mean writing the file every second.
+    pub fn saw_input(&mut self, ts: i64) -> bool {
+        let mut changed = false;
+        if self.first_input.is_none_or(|first| ts < first) {
+            self.first_input = Some(ts);
+            changed = true;
+        }
+        match self.last_input {
+            Some(last) if ts <= last => {}
+            last => {
+                changed |= last.is_none_or(|last| ts.div_euclid(60) != last.div_euclid(60));
+                self.last_input = Some(ts);
+            }
+        }
+        changed
+    }
+
+    /// How many of the day's reminders ended this way.
+    pub fn count(&self, outcome: Outcome) -> usize {
+        self.reminders.iter().filter(|r| r.outcome == outcome).count()
+    }
+
     pub fn active_secs(&self) -> u64 {
         self.sessions.iter().map(|s| s.active_secs).sum()
     }
@@ -136,14 +178,54 @@ impl DayRecord {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The shape `stats.json` is written in. Version 1 had no number, kept days
+/// from midnight and counted skips, snoozes and ignored reminders without
+/// saying when they happened.
+pub const VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stats {
-    /// Keyed by local date, `YYYY-MM-DD`.
+    /// Missing in a version 1 file, which reads as 0.
+    #[serde(default)]
+    pub version: u32,
+    /// Keyed by the day, `YYYY-MM-DD`; see [`day_of`].
     #[serde(default)]
     pub days: BTreeMap<NaiveDate, DayRecord>,
 }
 
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            days: BTreeMap::new(),
+        }
+    }
+}
+
 impl Stats {
+    /// Whether this was read from a file older than [`VERSION`].
+    pub fn is_outdated(&self) -> bool {
+        self.version < VERSION
+    }
+
+    /// Brings a version 1 history up to date. Its days began at midnight, so
+    /// every session is filed again under the day it ended in, by `day_of_ts`.
+    /// Its tallies of skips, snoozes and ignored reminders carried no time and
+    /// cannot become [`Reminder`]s; serde already left them behind.
+    pub fn upgrade(self, day_of_ts: impl Fn(i64) -> NaiveDate) -> Self {
+        if !self.is_outdated() {
+            return self;
+        }
+        let mut upgraded = Stats::default();
+        for session in self.days.into_values().flat_map(|day| day.sessions) {
+            upgraded.record(day_of_ts(session.end), session);
+        }
+        for day in upgraded.days.values_mut() {
+            day.sessions.sort_by_key(|s| s.end);
+        }
+        upgraded
+    }
+
     pub fn day(&self, date: NaiveDate) -> Option<&DayRecord> {
         self.days.get(&date)
     }
@@ -317,10 +399,51 @@ mod tests {
     }
 
     #[test]
+    fn input_is_saved_once_a_minute_but_always_kept() {
+        let mut day = DayRecord::default();
+        assert!(day.saw_input(120), "the first input of the day");
+        assert!(!day.saw_input(150), "the same minute");
+        assert_eq!(day.last_input, Some(150), "but still remembered");
+        assert!(day.saw_input(185), "a new minute");
+        assert!(!day.saw_input(130), "an older input moves nothing");
+        assert_eq!((day.first_input, day.last_input), (Some(120), Some(185)));
+    }
+
+    #[test]
+    fn a_version_one_file_is_filed_again_by_the_new_day() {
+        let v1 = r#"{"days":{
+            "2026-10-02":{"sessions":[{"start":1,"end":10,"active_secs":60,"target_secs":3000,"kind":"natural"}],
+                          "skips":2,"snoozes":1,"ignored":3},
+            "2026-10-03":{"sessions":[{"start":20,"end":30,"active_secs":60,"target_secs":3000,"kind":"prompted"}]}
+        }}"#;
+        let old: Stats = serde_json::from_str(v1).unwrap();
+        assert!(old.is_outdated());
+        // The second session ended at half past midnight: filed under the 3rd
+        // by midnight, it belongs to the evening of the 2nd.
+        let new = old.upgrade(|_| date(2));
+        assert!(!new.is_outdated());
+        assert_eq!(new.days.len(), 1);
+        let day = new.day(date(2)).unwrap();
+        assert_eq!(day.sessions.iter().map(|s| s.end).collect::<Vec<_>>(), [10, 30]);
+        assert!(day.reminders.is_empty(), "the old tallies had no times");
+    }
+
+    #[test]
+    fn a_fresh_history_is_already_current() {
+        assert!(!Stats::default().is_outdated());
+        let saved = serde_json::to_string(&Stats::default()).unwrap();
+        assert!(!serde_json::from_str::<Stats>(&saved).unwrap().is_outdated());
+    }
+
+    #[test]
     fn json_round_trip() {
         let mut stats = Stats::default();
         stats.record(date(2), session(40, 50));
-        stats.day_mut(date(2)).skips = 1;
+        stats.day_mut(date(2)).reminders.push(Reminder {
+            at: 7,
+            outcome: Outcome::Skipped,
+        });
+        stats.day_mut(date(2)).saw_input(3);
         let json = serde_json::to_string(&stats).unwrap();
         assert!(json.contains("\"2026-10-02\""));
         assert_eq!(serde_json::from_str::<Stats>(&json).unwrap(), stats);

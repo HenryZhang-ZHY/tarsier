@@ -18,7 +18,7 @@ use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
 use crate::i18n::{self, Language, tr};
 use crate::platform;
-use crate::stats::{Session, Stats, activity_day};
+use crate::stats::{Outcome, Reminder, Session, Stats, activity_day};
 use crate::tray;
 use crate::ui::break_overlay::{BreakOverlay, FADE_OUT};
 use crate::ui::switch_hud::{self, SwitchHud};
@@ -120,6 +120,27 @@ pub fn flip_destination(pair: [u8; 2], current: Option<u8>) -> Option<u8> {
     }
 }
 
+/// Reads the history, bringing an older file up to date. The old file is kept
+/// beside it first, as `stats.v1.json`: the upgrade drops what the new format
+/// has no place for, and that should never be the only copy.
+fn load_stats(path: &std::path::Path) -> Stats {
+    let loaded: Stats = config::load(path);
+    if !loaded.is_outdated() {
+        return loaded;
+    }
+    let backup = path.with_file_name("stats.v1.json");
+    if !backup.exists()
+        && let Err(e) = std::fs::copy(path, &backup)
+    {
+        log::error!("keeping {} as {}: {e}", path.display(), backup.display());
+    }
+    let upgraded = loaded.upgrade(activity_day);
+    if let Err(e) = config::save(path, &upgraded) {
+        log::error!("saving the upgraded {}: {e:#}", path.display());
+    }
+    upgraded
+}
+
 /// Where the controller keeps what it owns between runs.
 #[derive(Clone)]
 pub enum Storage {
@@ -150,7 +171,7 @@ impl Controller {
     pub fn init(cx: &mut App) -> Entity<Controller> {
         let storage = Storage::default_disk();
         let (mut config, stats): (Config, Stats) = match &storage {
-            Storage::Disk { config: c, stats: s } => (config::load(c), config::load(s)),
+            Storage::Disk { config: c, stats: s } => (config::load(c), load_stats(s)),
             Storage::Memory => Default::default(),
         };
         config.migrate();
@@ -668,13 +689,19 @@ impl Controller {
         let suppressed =
             !breaks.enabled || self.paused_until.is_some() || (breaks.respect_fullscreen && platform::user_is_busy());
         let idle = platform::idle_secs();
+        let last_input = now - idle as i64;
+        if self.stats.day_mut(activity_day(last_input)).saw_input(last_input) {
+            self.stats_dirty = true;
+        }
         for event in self.tracker.tick(now, dt, idle, suppressed) {
             match event {
                 BreakEvent::PromptBreak => self.open_overlays(cx),
-                BreakEvent::BreakFinished => self.close_overlays(cx),
+                BreakEvent::BreakFinished => {
+                    self.note_reminder(now, Outcome::Rested);
+                    self.close_overlays(cx);
+                }
                 BreakEvent::BreakIgnored => {
-                    self.stats.day_mut(activity_day(now)).ignored += 1;
-                    self.stats_dirty = true;
+                    self.note_reminder(now, Outcome::Ignored);
                     self.close_overlays(cx);
                 }
                 BreakEvent::SessionEnded(session) => {
@@ -714,18 +741,24 @@ impl Controller {
 
     pub fn snooze(&mut self, cx: &mut Context<Self>) {
         self.tracker.snooze();
-        self.stats.day_mut(activity_day(now_ts())).snoozes += 1;
-        self.stats_dirty = true;
+        self.note_reminder(now_ts(), Outcome::Snoozed);
         self.close_overlays(cx);
         cx.notify();
     }
 
     pub fn skip(&mut self, cx: &mut Context<Self>) {
         self.tracker.skip();
-        self.stats.day_mut(activity_day(now_ts())).skips += 1;
-        self.stats_dirty = true;
+        self.note_reminder(now_ts(), Outcome::Skipped);
         self.close_overlays(cx);
         cx.notify();
+    }
+
+    fn note_reminder(&mut self, at: i64, outcome: Outcome) {
+        self.stats
+            .day_mut(activity_day(at))
+            .reminders
+            .push(Reminder { at, outcome });
+        self.stats_dirty = true;
     }
 
     pub fn toggle_pause(&mut self, cx: &mut Context<Self>) {

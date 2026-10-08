@@ -13,7 +13,7 @@ use crate::breaks::{BreakKind, Phase};
 use crate::controller::{Controller, now_ts};
 use crate::i18n::tr;
 use crate::skin::{Control, Mark, Tone, Voice};
-use crate::stats::{self, GOOD_SCORE, activity_day};
+use crate::stats::{self, GOOD_SCORE, Outcome, activity_day};
 use crate::ui::format_minutes;
 use crate::ui::kit::{self, skin};
 
@@ -378,13 +378,18 @@ fn render_sessions(c: &Controller, cx: &App) -> AnyElement {
             )))
             .child(skin(cx).chip(&score.to_string(), score_mark(Some(score)), cx))
     });
-    let tally = (day.skips + day.snoozes + day.ignored > 0).then(|| {
+    let (skips, snoozes, ignored) = (
+        day.count(Outcome::Skipped),
+        day.count(Outcome::Snoozed),
+        day.count(Outcome::Ignored),
+    );
+    let tally = (skips + snoozes + ignored > 0).then(|| {
         kit::hint(
             tr!(
                 "Today: {skipped} skipped, {snoozed} snoozed, {ignored} ignored",
-                skipped = day.skips,
-                snoozed = day.snoozes,
-                ignored = day.ignored
+                skipped = skips,
+                snoozed = snoozes,
+                ignored = ignored
             ),
             cx,
         )
