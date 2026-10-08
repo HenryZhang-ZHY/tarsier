@@ -7,7 +7,7 @@
 | File | Contents |
 | --- | --- |
 | `config.json` | Settings |
-| `stats.json` | Per-day work session records |
+| `stats.json` | What each day held: stretches of work, reminders, first and last input, the evening cutoff and anything said when carrying on past it |
 | `tarsier.log` | Log file |
 
 Anything you can change in the UI is written back to `config.json`. Everything below can also be edited by hand; the fields that have no UI are marked, and those need a restart to take effect. The file is JSON, missing fields fall back to defaults, and a malformed file is ignored with a warning in the log.
@@ -72,7 +72,24 @@ A skin is more than a palette: it owns the canvas, the panels, the type and the 
 }
 ```
 
-When `respect_fullscreen` is true, reminders are held while a fullscreen game, video, or presentation is detected. See [Breaks and scoring](breaks.md).
+When `respect_fullscreen` is true, reminders are held while a fullscreen game, video, or presentation is detected. See [Breaks, the evening cutoff and the week](breaks.md).
+
+### `evening`
+
+```json
+{
+  "evening": {
+    "enabled": false,
+    "cutoff": "22:00"
+  }
+}
+```
+
+The evening cutoff, also on **Settings → Breaks**. `cutoff` is a time of day from `"12:00"` to `"04:59"`: the day starts again at 05:00, and a morning cutoff would cover the whole working day. A value that is not such a time falls back to `"22:00"` with a warning in the log, rather than costing the rest of the file. See [Breaks, the evening cutoff and the week](breaks.md#the-evening-cutoff).
+
+## `stats.json`
+
+Days are keyed `YYYY-MM-DD` and run from 05:00 to 05:00. The file carries `"version": 2`. A file from before that — no version, days from midnight, skips and snoozes as bare counts — is copied to `stats.v1.json` on the first start, then converted: its sessions are filed under the day they ended in, and the counts, which say nothing about when, are dropped.
 
 ## Per-monitor settings: `monitors.<id>`
 

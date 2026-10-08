@@ -5,7 +5,7 @@
 //! (buttons, segmented pickers, navigation items) and the type weights, because
 //! those together are what make a style recognisable.
 //!
-//! Screens ask for *intent* — "a card", "a primary button", "a fair score" — and
+//! Screens ask for *intent* — "a card", "a primary button", "a stretch that ran long" — and
 //! never for a border width or a hex value, so a new skin is one file
 //! implementing [`SkinStyle`] plus an arm in [`Skin::style`].
 //!

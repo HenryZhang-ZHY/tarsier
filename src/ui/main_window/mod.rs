@@ -1,7 +1,7 @@
 //! The main window: a title bar with the page tabs, and one scrolling page.
 //!
 //! - [`monitors`]: brightness, contrast and input switching.
-//! - [`breaks`]: the break timer and the scores it produces.
+//! - [`breaks`]: the break timer and the week it adds up to.
 //! - [`settings`]: everything configurable, one section at a time; the
 //!   per-monitor computer setup lives in [`displays`].
 //!

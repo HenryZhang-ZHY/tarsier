@@ -11,7 +11,7 @@ It lives in the tray, draws its own title bar, supports light, dark, and follow-
 The window is drawn in one of two visual languages, switchable on the Settings tab:
 
 - **Default** — the look tarsier has always had: the system font, soft corners, quiet greys.
-- **Neo Brutalism** — warm paper, black ink, 2px strokes and hard offset shadows, set in a bundled copy of Space Grotesk. Colour is spent sparingly: one yellow accent for the thing to press and "you are here", status colours only for scores, and a colour per computer. Light only, by design.
+- **Neo Brutalism** — warm paper, black ink, 2px strokes and hard offset shadows, set in a bundled copy of Space Grotesk. Colour is spent sparingly: one yellow accent for the thing to press and "you are here", status colours only for stretches that ran long, and a colour per computer. Light only, by design.
 
 A skin owns the whole visual language, not just the colours — the canvas, the cards, the type weights, the marks and the controls — so the two never mix. Adding one means writing a single file that implements `SkinStyle`; no screen has to be touched, because screens ask for "a card" or "a primary button" rather than for a border width.
 
@@ -22,7 +22,8 @@ The quick-switch panel is drawn in the active skin too. The break overlay keeps 
 - **Brightness / contrast**: adjust external monitors directly over DDC/CI.
 - **One-key input switching**: list the computers sharing each monitor and switch with a hotkey or the tray menu. Two computers flip blind; three or more ask which one first. Monitors that ignore the standard command (recent LGs, for instance) fall back to a vendor-private channel automatically.
 - **Break reminders**: after a stretch of work, a translucent overlay fades in across every screen, Fadetop-style. It never steals focus and clicks pass straight through. The countdown only runs while you are actually away from the keyboard and mouse.
-- **Scoring**: every work session is scored by length, with points, titles, and a streak of good days.
+- **Evening cutoff**: set the time after which you would rather not be at the computer. Fifteen minutes before, a card in the corner says it is coming; at the time, a dark layer covers every screen until 05:00. Carrying on is always one sentence away — say what you still need to do — and nothing on it shuts your computer down for you.
+- **The week**: no score, no points. The Breaks tab draws each day as it happened — every stretch of work, the ones that ran long, when the evening ended — and says in plain numbers how often you kept to your rhythm and your cutoff.
 
 ## Install
 
@@ -37,7 +38,7 @@ It stays in the tray; double-click the tray icon to open the main window.
 | `Ctrl+Alt+I` | Switch monitor input. Two computers: a blind flip. Three or more: a quick-switch panel, jump by number |
 | `Ctrl+Alt+PageUp` / `PageDown` | Brightness ±10% on every monitor |
 
-The window has three tabs — **Monitors**, **Breaks** (the timer and the scores it produces) and **Settings** — and the Settings tab is split into sections down the left (General, Breaks, Displays, Hotkeys, Advanced), so a setting is one click from its name rather than somewhere in a long column.
+The window has three tabs — **Monitors**, **Breaks** (the timer and the week it adds up to) and **Settings** — and the Settings tab is split into sections down the left (General, Breaks, Displays, Hotkeys, Advanced), so a setting is one click from its name rather than somewhere in a long column.
 
 **Hotkeys are recorded in the UI**: click Record next to one, press the combination, and it takes effect immediately. No config file, no restart. Everything else lives on the Settings tab, or in `%APPDATA%\tarsier\config.json`.
 
@@ -46,7 +47,7 @@ The window has three tabs — **Monitors**, **Breaks** (the timer and the scores
 - [Building and running](docs/building.md) — build from source, command-line flags
 - [Configuration reference](docs/configuration.md) — every field in `config.json`
 - [Vendor-private channels](docs/private-channels.md) — why recent LGs need the GPU driver, and the UAC prompt
-- [Breaks and scoring](docs/breaks.md) — reminder rules, snooze, ignore, how the score is computed
+- [Breaks, the evening cutoff and the week](docs/breaks.md) — reminder rules, snooze, ignore, the cutoff, what the week shows
 - [Developer mode](docs/developer-mode.md) — DDC/CI diagnostics and command tracing
 - [Known limitations](docs/limitations.md) — when a monitor can't be controlled
 

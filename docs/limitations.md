@@ -19,6 +19,10 @@ With **two** computers the hotkey is a blind flip: one press, no thinking. When 
 
 The tray menu lists destinations ("switch to X") and has no "flip to the other one" entry: a flip depends on the monitor's current input, and the menu does not pretend to know it.
 
+## Overlays
+
+- A game in exclusive fullscreen can draw over the break and evening overlays. Borderless-windowed games and video players don't.
+
 ## Platform
 
 Windows only. Everything beyond DDC/CI — the tray, hotkeys, autostart, the overlay window — calls Win32 directly.
