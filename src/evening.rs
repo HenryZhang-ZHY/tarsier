@@ -55,14 +55,6 @@ impl ClockTime {
         }
     }
 
-    pub fn hour(self) -> u8 {
-        self.hour
-    }
-
-    pub fn minute(self) -> u8 {
-        self.minute
-    }
-
     pub fn time(self) -> NaiveTime {
         NaiveTime::from_hms_opt(self.hour.into(), self.minute.into(), 0).expect("a valid time of day")
     }

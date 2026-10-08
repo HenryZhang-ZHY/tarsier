@@ -4,8 +4,6 @@ mod breaks;
 mod config;
 mod controller;
 mod display;
-// Not drawn on screen yet; the controller takes it up shortly.
-#[allow(dead_code)]
 mod evening;
 mod i18n;
 mod logger;

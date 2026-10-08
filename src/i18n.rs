@@ -369,6 +369,26 @@ static ZH: &[(&str, &str)] = &[
     ("{n} days", "{n} 天"),
     ("Points", "积分"),
     ("Evening cutoff", "下机时间"),
+    ("Evening cutoff at {time}", "{time} 下机"),
+    (
+        "1 minute left. Time to start wrapping up.",
+        "还有 {n} 分钟，可以开始收尾了。",
+    ),
+    (
+        "{n} minutes left. Time to start wrapping up.",
+        "还有 {n} 分钟，可以开始收尾了。",
+    ),
+    (
+        "It is past {time}, the time you chose to stop using the computer.",
+        "已过 {time}，这是你给自己定的下机时间。",
+    ),
+    ("At {time} you said: “{reason}”", "{time} 时你说：「{reason}」"),
+    ("Keep using", "继续使用"),
+    ("What do you still need to do?", "还要用电脑做什么？"),
+    (
+        "Enter to carry on for 15 minutes · Esc to cancel",
+        "回车后继续使用 15 分钟 · Esc 取消",
+    ),
     ("Stop using the computer in the evening", "晚上到点下机"),
     (
         "From the time you set until 05:00, an overlay over every screen says the day is done. You can always carry on.",

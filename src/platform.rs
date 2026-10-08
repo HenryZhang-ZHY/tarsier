@@ -7,6 +7,10 @@ use anyhow::Result;
 use windows::Win32::Foundation::{
     COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, WAIT_OBJECT_0,
 };
+use windows::Win32::Graphics::Dwm::{
+    DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
@@ -24,6 +28,21 @@ use windows::core::HSTRING;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const BACKGROUND_ARG: &str = "--background";
+
+/// Takes away what Windows 11 draws around a window of its own accord: a
+/// rounded hairline border and a drop shadow. A small floating window draws its
+/// own card, and the frame around it would show as a second, empty box. A
+/// window that covers the whole display never shows the frame, so only the
+/// small ones need this.
+pub fn remove_frame(hwnd: isize) {
+    let hwnd = HWND(hwnd as _);
+    let set = |attribute, value: u32| unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, attribute, (&raw const value).cast(), size_of::<u32>() as u32);
+    };
+    set(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED.0 as u32);
+    set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0 as u32);
+    set(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+}
 
 /// The Run-key value this copy owns. A copy with its own data directory gets a
 /// value of its own, so turning autostart on or off there never touches the

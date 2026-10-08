@@ -1,4 +1,5 @@
 pub mod break_overlay;
+pub mod evening;
 mod kit;
 pub mod main_window;
 mod number_field;
@@ -23,8 +24,10 @@ icon_assets!(
         Contrast,
         Flame,
         Monitor,
+        Moon,
         RefreshCw,
         Sun,
+        Sunset,
         Timer,
         Trophy,
     ]

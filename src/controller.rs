@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
+use chrono::{Local, NaiveDate, NaiveDateTime};
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 
@@ -16,10 +16,12 @@ use crate::breaks::{BreakEvent, BreakTracker, Phase};
 use crate::config::{self, Config, MonitorPrefs};
 use crate::display::mccs::{self, VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::display::{self, Feature};
+use crate::evening;
 use crate::i18n::{self, Language, tr};
 use crate::platform;
-use crate::stats::{Outcome, Reminder, Session, Stats, activity_day};
+use crate::stats::{self, Outcome, Reminder, Session, Stats, activity_day};
 use crate::tray;
+use crate::ui;
 use crate::ui::break_overlay::{BreakOverlay, FADE_OUT};
 use crate::ui::switch_hud::{self, SwitchHud};
 
@@ -80,6 +82,15 @@ pub struct Controller {
     hotkey_hold: bool,
     writes: HashMap<(String, u8), WriteSlot>,
     overlays: Vec<(WindowHandle<BreakOverlay>, Entity<BreakOverlay>)>,
+    /// What the evening cutoff shows right now, worked out every tick.
+    pub evening: evening::Status,
+    /// The local time `evening` was worked out at, so every window draws the
+    /// same minute.
+    evening_at: NaiveDateTime,
+    /// The day whose heads-up the user closed.
+    heads_up_closed: Option<NaiveDate>,
+    /// The evening's windows, and what they were opened for.
+    evening_windows: EveningWindows,
     /// One quick-switch panel per display while it is open.
     switch_huds: Vec<WindowHandle<SwitchHud>>,
     /// Set from the request until the panels exist: they are built in a
@@ -94,6 +105,55 @@ pub struct Controller {
     stats_dirty: bool,
     pub main_window: Option<AnyWindowHandle>,
     storage: Storage,
+    /// Tests set the time the evening is worked out at.
+    #[cfg(test)]
+    pub fake_now: Option<i64>,
+}
+
+/// Which of the evening's windows are wanted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Shown {
+    #[default]
+    Nothing,
+    HeadsUp,
+    Cutoff,
+}
+
+impl Shown {
+    fn of(status: evening::Status) -> Self {
+        match status {
+            evening::Status::HeadsUp { .. } => Self::HeadsUp,
+            evening::Status::Cutoff { .. } => Self::Cutoff,
+            evening::Status::Quiet | evening::Status::KeepingOn { .. } => Self::Nothing,
+        }
+    }
+}
+
+/// The evening's windows. Opened in a deferred callback, so `shown` is set
+/// when they are asked for and the handles arrive a moment later.
+#[derive(Default)]
+struct EveningWindows {
+    shown: Shown,
+    heads_up: Option<WindowHandle<ui::evening::HeadsUpCard>>,
+    overlays: Vec<WindowHandle<ui::evening::CutoffOverlay>>,
+    keep_using: Option<WindowHandle<ui::evening::KeepUsing>>,
+}
+
+/// A borderless window on `display` that floats above everything and does
+/// not take focus when it appears. The caller sets where it goes.
+fn popup_options(display: DisplayId) -> WindowOptions {
+    WindowOptions {
+        titlebar: None,
+        focus: false,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        display_id: Some(display),
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    }
 }
 
 /// How long a notice stays at the foot of the main window.
@@ -213,6 +273,10 @@ impl Controller {
             hotkey_hold: false,
             writes: HashMap::new(),
             overlays: Vec::new(),
+            evening: evening::Status::Quiet,
+            evening_at: stats::local_time(now_ts()),
+            heads_up_closed: None,
+            evening_windows: EveningWindows::default(),
             switch_huds: Vec::new(),
             switch_hud_opening: false,
             switch_hud_generation: 0,
@@ -222,6 +286,8 @@ impl Controller {
             stats_dirty: false,
             main_window: None,
             storage,
+            #[cfg(test)]
+            fake_now: None,
         }
     }
 
@@ -685,14 +751,18 @@ impl Controller {
         if self.paused_until.is_some_and(|t| t <= now) {
             self.paused_until = None;
         }
-        let breaks = &self.config.breaks;
-        let suppressed =
-            !breaks.enabled || self.paused_until.is_some() || (breaks.respect_fullscreen && platform::user_is_busy());
         let idle = platform::idle_secs();
         let last_input = now - idle as i64;
         if self.stats.day_mut(activity_day(last_input)).saw_input(last_input) {
             self.stats_dirty = true;
         }
+        self.sync_evening(now, cx);
+        let breaks = &self.config.breaks;
+        // One overlay at a time: in the evening a break is not the point.
+        let suppressed = !breaks.enabled
+            || self.paused_until.is_some()
+            || matches!(self.evening, evening::Status::Cutoff { .. })
+            || (breaks.respect_fullscreen && platform::user_is_busy());
         for event in self.tracker.tick(now, dt, idle, suppressed) {
             match event {
                 BreakEvent::PromptBreak => self.open_overlays(cx),
@@ -846,12 +916,186 @@ impl Controller {
         });
     }
 
+    // ---- evening ---------------------------------------------------------
+
+    /// The time now, or the time a test says it is.
+    fn now(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(now) = self.fake_now {
+            return now;
+        }
+        now_ts()
+    }
+
+    /// The local time the evening was last worked out at.
+    pub fn evening_now(&self) -> NaiveDateTime {
+        self.evening_at
+    }
+
+    /// Works out what the evening shows at `now`, keeps the day's record in
+    /// step with the setting, and opens or closes windows to match.
+    pub fn sync_evening(&mut self, now: i64, cx: &mut Context<Self>) {
+        let local = stats::local_time(now);
+        let day = stats::day_of(local);
+        let cutoff = self.config.evening.enabled.then_some(self.config.evening.cutoff);
+        let record = self.stats.day_mut(day);
+        if record.follow_cutoff(day, cutoff, local) {
+            self.stats_dirty = true;
+        }
+        let last_extension = record.last_extension().map(|e| stats::local_time(e.at));
+        let status = evening::status(local, cutoff, self.heads_up_closed == Some(day), last_extension);
+        self.evening_at = local;
+        if status != self.evening {
+            self.evening = status;
+            cx.notify();
+        }
+
+        let wanted = Shown::of(status);
+        if wanted == self.evening_windows.shown {
+            return;
+        }
+        if wanted == Shown::Cutoff && matches!(self.tracker.phase(), Phase::Prompted { .. }) {
+            // The break's overlay gives way; it would only be stacked under.
+            self.tracker.snooze();
+            self.close_overlays(cx);
+        }
+        self.close_evening_windows(cx);
+        self.evening_windows.shown = wanted;
+        match wanted {
+            Shown::Nothing => {}
+            Shown::HeadsUp => self.open_heads_up(cx),
+            Shown::Cutoff => self.open_cutoff(cx),
+        }
+    }
+
+    /// What the user said the last time they carried on tonight, and when.
+    pub fn evening_said(&self) -> Option<(NaiveDateTime, String)> {
+        let day = stats::day_of(self.evening_at);
+        let extension = self.stats.day(day)?.last_extension()?;
+        Some((stats::local_time(extension.at), extension.reason.clone()))
+    }
+
+    /// The user closed the heads-up card: not again tonight.
+    pub fn close_heads_up(&mut self, cx: &mut Context<Self>) {
+        self.heads_up_closed = Some(stats::day_of(self.evening_at));
+        self.sync_evening(self.now(), cx);
+    }
+
+    /// The user is carrying on past the cutoff, to do `reason`. Nothing
+    /// happens without a reason; with one, the overlay steps aside for
+    /// [`evening::EXTENSION`].
+    pub fn keep_using(&mut self, reason: &str, cx: &mut Context<Self>) {
+        let reason = reason.trim();
+        if reason.is_empty() || !matches!(self.evening, evening::Status::Cutoff { .. }) {
+            return;
+        }
+        let now = self.now();
+        let day = stats::day_of(stats::local_time(now));
+        let cutoff = self.config.evening.cutoff;
+        let record = self.stats.day_mut(day);
+        let evening = record.evening.get_or_insert_with(|| stats::EveningRecord {
+            cutoff,
+            extensions: Vec::new(),
+        });
+        evening.extensions.push(stats::Extension {
+            at: now,
+            reason: reason.to_string(),
+        });
+        // What someone typed is worth more than a second's wait for the save.
+        self.save_stats();
+        self.sync_evening(now, cx);
+    }
+
+    fn open_heads_up(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            if this.read(cx).evening_windows.shown != Shown::HeadsUp {
+                return;
+            }
+            let Some(display) = cx.primary_display() else {
+                return;
+            };
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(ui::evening::heads_up_bounds(
+                    display.visible_bounds(),
+                ))),
+                ..popup_options(display.id())
+            };
+            match cx.open_window(options, |window, cx| {
+                cx.new(|cx| ui::evening::HeadsUpCard::new(window, cx))
+            }) {
+                Ok(handle) => this.update(cx, |this, _| this.evening_windows.heads_up = Some(handle)),
+                Err(e) => log::error!("failed to open the evening heads-up: {e}"),
+            }
+        });
+    }
+
+    fn open_cutoff(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            if this.read(cx).evening_windows.shown != Shown::Cutoff {
+                return;
+            }
+            let mut overlays = Vec::new();
+            for display in cx.displays() {
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(display.bounds())),
+                    ..popup_options(display.id())
+                };
+                match cx.open_window(options, |window, cx| {
+                    cx.new(|cx| ui::evening::CutoffOverlay::new(window, cx))
+                }) {
+                    Ok(handle) => overlays.push(handle),
+                    Err(e) => log::error!("failed to open the evening overlay: {e}"),
+                }
+            }
+            // After the overlays, so it lands on top of them.
+            let keep_using = cx.primary_display().and_then(|display| {
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(ui::evening::keep_using_bounds(display.bounds()))),
+                    ..popup_options(display.id())
+                };
+                cx.open_window(options, |window, cx| {
+                    cx.new(|cx| ui::evening::KeepUsing::new(window, cx))
+                })
+                .inspect_err(|e| log::error!("failed to open the keep-using box: {e}"))
+                .ok()
+            });
+            this.update(cx, |this, _| {
+                this.evening_windows.overlays = overlays;
+                this.evening_windows.keep_using = keep_using;
+            });
+        });
+    }
+
+    /// Deferred, like every other close: the request may come from inside one
+    /// of these very windows.
+    fn close_evening_windows(&mut self, cx: &mut Context<Self>) {
+        let windows = std::mem::take(&mut self.evening_windows);
+        cx.defer(move |cx| {
+            let EveningWindows {
+                heads_up,
+                overlays,
+                keep_using,
+                ..
+            } = windows;
+            let mut all: Vec<AnyWindowHandle> = overlays.into_iter().map(Into::into).collect();
+            all.extend(heads_up.map(AnyWindowHandle::from));
+            all.extend(keep_using.map(AnyWindowHandle::from));
+            for handle in all {
+                handle.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+        });
+    }
+
     // ---- settings --------------------------------------------------------
 
     pub fn update_config(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Config)) {
         f(&mut self.config);
         self.tracker.set_settings(self.config.breaks.settings());
         self.save_config();
+        // A new cutoff, or none, shows at once rather than on the next tick.
+        self.sync_evening(self.now(), cx);
         cx.notify();
     }
 
@@ -1314,10 +1558,11 @@ mod tests {
     // Not `use super::*`: that would pull in GPUI's own `test` attribute.
     use std::time::Duration;
 
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{AppContext as _, TestAppContext};
 
-    use super::{Controller, MonitorEntry, NOTICE_LIFETIME, flip_destination};
+    use super::{Controller, MonitorEntry, NOTICE_LIFETIME, Shown, flip_destination};
     use crate::config::{Config, MonitorPrefs};
+    use crate::evening::ClockTime;
 
     #[test]
     fn a_flip_refuses_to_guess_when_it_cannot_tell_which_way_to_go() {
@@ -1448,5 +1693,137 @@ mod tests {
         let prefs = cx.update(|cx| c.read(cx).monitor_prefs("m"));
         assert_eq!(prefs.endpoints, vec![0x0F, 0x11]);
         assert_eq!(prefs.local_input, None, "no other port is guessed in its place");
+    }
+
+    /// Tonight at `h:m`, as a Unix timestamp. Before 05:00 is the next
+    /// calendar date, as the evening runs on past midnight.
+    fn tonight(h: u32, m: u32) -> i64 {
+        use chrono::{Days, Local, TimeZone};
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 10, 8).unwrap();
+        let date = if h < 5 {
+            day.checked_add_days(Days::new(1)).unwrap()
+        } else {
+            day
+        };
+        let at = date.and_hms_opt(h, m, 0).unwrap();
+        Local.from_local_datetime(&at).earliest().unwrap().timestamp()
+    }
+
+    fn evening_at_nine(cx: &mut TestAppContext) -> gpui_kit::Entity<Controller> {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::skin::register_fonts(cx);
+        });
+        let mut config = Config::default();
+        config.evening.enabled = true;
+        config.evening.cutoff = ClockTime::new(21, 0).unwrap();
+        cx.update(|cx| Controller::for_test(config, Vec::new(), cx))
+    }
+
+    fn at(c: &gpui_kit::Entity<Controller>, now: i64, cx: &mut TestAppContext) {
+        c.update(cx, |c, cx| {
+            c.fake_now = Some(now);
+            c.sync_evening(now, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// (heads-up card, overlays, keep-using box)
+    fn shown(c: &gpui_kit::Entity<Controller>, cx: &mut TestAppContext) -> (bool, usize, bool) {
+        cx.update(|cx| {
+            let w = &c.read(cx).evening_windows;
+            (w.heads_up.is_some(), w.overlays.len(), w.keep_using.is_some())
+        })
+    }
+
+    #[gpui_kit::test]
+    fn an_evening_on_screen(cx: &mut TestAppContext) {
+        let c = evening_at_nine(cx);
+        at(&c, tonight(20, 30), cx);
+        assert_eq!(shown(&c, cx), (false, 0, false));
+        at(&c, tonight(20, 50), cx);
+        assert_eq!(shown(&c, cx), (true, 0, false), "a heads-up in the corner");
+        at(&c, tonight(21, 0), cx);
+        let (heads_up, overlays, keep_using) = shown(&c, cx);
+        assert!(!heads_up, "the card gives way");
+        assert!(overlays > 0, "one overlay per display");
+        assert!(keep_using);
+        at(&c, tonight(5, 0), cx);
+        assert_eq!(shown(&c, cx), (false, 0, false), "a new day");
+    }
+
+    #[gpui_kit::test]
+    fn a_closed_heads_up_stays_closed(cx: &mut TestAppContext) {
+        let c = evening_at_nine(cx);
+        at(&c, tonight(20, 50), cx);
+        c.update(cx, |c, cx| c.close_heads_up(cx));
+        cx.run_until_parked();
+        assert_eq!(shown(&c, cx), (false, 0, false));
+        at(&c, tonight(20, 55), cx);
+        assert_eq!(shown(&c, cx), (false, 0, false), "not again tonight");
+    }
+
+    #[gpui_kit::test]
+    fn carrying_on_needs_a_reason_and_is_remembered(cx: &mut TestAppContext) {
+        let c = evening_at_nine(cx);
+        at(&c, tonight(21, 5), cx);
+        let keep_using = cx
+            .update(|cx| c.read(cx).evening_windows.keep_using)
+            .expect("the box is up");
+        cx.update_window(keep_using.into(), |_, window, cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.render_frame(cx);
+            window.click("keep-using", cx);
+            window.render_frame(cx);
+            // Enter on nothing is not a reason.
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(shown(&c, cx).1 > 0, "still up");
+
+        cx.update_window(keep_using.into(), |_, window, cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.input("  finish the deploy  ", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(shown(&c, cx), (false, 0, false), "the overlay steps aside");
+        let said = cx.update(|cx| c.read(cx).evening_said());
+        assert_eq!(said.map(|(_, reason)| reason).as_deref(), Some("finish the deploy"));
+
+        at(&c, tonight(21, 19), cx);
+        assert_eq!(shown(&c, cx).1, 0, "for a quarter of an hour");
+        at(&c, tonight(21, 21), cx);
+        assert!(shown(&c, cx).1 > 0, "then it is back");
+    }
+
+    #[gpui_kit::test]
+    fn turning_the_cutoff_off_takes_the_overlay_away_at_once(cx: &mut TestAppContext) {
+        let c = evening_at_nine(cx);
+        at(&c, tonight(22, 0), cx);
+        assert!(shown(&c, cx).1 > 0);
+        c.update(cx, |c, cx| c.update_config(cx, |cfg| cfg.evening.enabled = false));
+        cx.run_until_parked();
+        assert_eq!(shown(&c, cx), (false, 0, false));
+        assert_eq!(cx.update(|cx| c.read(cx).evening_windows.shown), Shown::Nothing);
+    }
+
+    #[gpui_kit::test]
+    fn a_break_reminder_gives_way_to_the_evening(cx: &mut TestAppContext) {
+        let c = evening_at_nine(cx);
+        c.update(cx, |c, cx| c.break_now(cx));
+        cx.run_until_parked();
+        at(&c, tonight(21, 0), cx);
+        cx.update(|cx| {
+            let c = c.read(cx);
+            assert_eq!(
+                c.tracker.phase(),
+                crate::breaks::Phase::Working,
+                "the break was put off"
+            );
+            assert!(c.overlays.is_empty(), "its overlay closed");
+        });
     }
 }

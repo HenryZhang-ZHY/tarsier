@@ -10,6 +10,7 @@ use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZon
 use serde::{Deserialize, Serialize};
 
 use crate::breaks::{BreakKind, EndedSession};
+use crate::evening::{self, ClockTime};
 use crate::i18n::translate;
 
 /// Sessions shorter than this don't earn points (but still count for time).
@@ -112,6 +113,22 @@ pub struct Reminder {
     pub outcome: Outcome,
 }
 
+/// The user chose to carry on past the cutoff, and said what for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Extension {
+    pub at: i64,
+    pub reason: String,
+}
+
+/// A day the evening cutoff was on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EveningRecord {
+    /// The cutoff in force that day, which the setting may have moved since.
+    pub cutoff: ClockTime,
+    #[serde(default)]
+    pub extensions: Vec<Extension>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DayRecord {
     /// The first and last keyboard or mouse input of the day.
@@ -123,6 +140,9 @@ pub struct DayRecord {
     pub sessions: Vec<Session>,
     #[serde(default)]
     pub reminders: Vec<Reminder>,
+    /// Present on the days the cutoff was on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evening: Option<EveningRecord>,
 }
 
 impl DayRecord {
@@ -143,6 +163,50 @@ impl DayRecord {
             }
         }
         changed
+    }
+
+    /// Keeps the day's cutoff in step with the setting, `None` when it is
+    /// off. True when the record changed.
+    ///
+    /// A day the cutoff was on at all is a day it counts for: shutting down
+    /// before it is exactly the evening it is for, and tarsier never sees the
+    /// cutoff arrive then. Turning it off before the evening begins takes the
+    /// day back out; once the evening is under way the day keeps its record.
+    pub fn follow_cutoff(&mut self, day: NaiveDate, cutoff: Option<ClockTime>, now: NaiveDateTime) -> bool {
+        match (cutoff, &mut self.evening) {
+            (Some(cutoff), Some(record)) if record.cutoff == cutoff => false,
+            (Some(cutoff), Some(record)) => {
+                record.cutoff = cutoff;
+                true
+            }
+            (Some(cutoff), None) => {
+                self.evening = Some(EveningRecord {
+                    cutoff,
+                    extensions: Vec::new(),
+                });
+                true
+            }
+            (None, Some(record)) if now < evening::cutoff_at(day, record.cutoff) => {
+                self.evening = None;
+                true
+            }
+            (None, _) => false,
+        }
+    }
+
+    /// When the user last chose to carry on past the cutoff this day.
+    pub fn last_extension(&self) -> Option<&Extension> {
+        self.evening.as_ref()?.extensions.last()
+    }
+
+    /// Whether the day's computer use ended in time for its cutoff; `None`
+    /// when the cutoff was off. A day with no input at all stopped in time.
+    pub fn stopped_in_time(&self, day: NaiveDate) -> Option<bool> {
+        let cutoff = self.evening.as_ref()?.cutoff;
+        Some(
+            self.last_input
+                .is_none_or(|last| evening::stopped_in_time(day, cutoff, local_time(last))),
+        )
     }
 
     /// How many of the day's reminders ended this way.
@@ -441,6 +505,42 @@ mod tests {
         assert!(!serde_json::from_str::<Stats>(&saved).unwrap().is_outdated());
     }
 
+    fn ts(at: NaiveDateTime) -> i64 {
+        Local.from_local_datetime(&at).earliest().unwrap().timestamp()
+    }
+
+    #[test]
+    fn the_evening_record_follows_the_setting_until_the_evening_begins() {
+        let nine = ClockTime::new(21, 0);
+        let ten = ClockTime::new(22, 0);
+        let mut day = DayRecord::default();
+        assert!(day.follow_cutoff(date(8), nine, at(8, 9, 0)));
+        assert!(!day.follow_cutoff(date(8), nine, at(8, 9, 1)), "nothing new");
+        assert!(day.follow_cutoff(date(8), ten, at(8, 12, 0)));
+        assert_eq!(day.evening.as_ref().unwrap().cutoff, ten.unwrap());
+        // Off before the evening: the day is not one the cutoff was on.
+        assert!(day.follow_cutoff(date(8), None, at(8, 18, 0)));
+        assert!(day.evening.is_none());
+        // Off once it is under way: the day keeps its record.
+        day.follow_cutoff(date(8), nine, at(8, 21, 30));
+        assert!(!day.follow_cutoff(date(8), None, at(8, 21, 40)));
+        assert!(day.evening.is_some());
+    }
+
+    #[test]
+    fn a_day_stopped_in_time_by_its_own_cutoff() {
+        let mut day = DayRecord::default();
+        assert_eq!(day.stopped_in_time(date(8)), None, "the cutoff was off");
+        day.follow_cutoff(date(8), ClockTime::new(21, 0), at(8, 9, 0));
+        assert_eq!(day.stopped_in_time(date(8)), Some(true), "no input at all");
+        day.saw_input(ts(at(8, 20, 40)));
+        assert_eq!(day.stopped_in_time(date(8)), Some(true));
+        day.saw_input(ts(at(8, 21, 4)));
+        assert_eq!(day.stopped_in_time(date(8)), Some(true), "wrapping up");
+        day.saw_input(ts(at(9, 0, 20)));
+        assert_eq!(day.stopped_in_time(date(8)), Some(false));
+    }
+
     #[test]
     fn json_round_trip() {
         let mut stats = Stats::default();
@@ -450,6 +550,13 @@ mod tests {
             outcome: Outcome::Skipped,
         });
         stats.day_mut(date(2)).saw_input(3);
+        stats.day_mut(date(3)).evening = Some(EveningRecord {
+            cutoff: ClockTime::new(21, 30).unwrap(),
+            extensions: vec![Extension {
+                at: 9,
+                reason: "把部署脚本跑完".into(),
+            }],
+        });
         let json = serde_json::to_string(&stats).unwrap();
         assert!(json.contains("\"2026-10-02\""));
         assert_eq!(serde_json::from_str::<Stats>(&json).unwrap(), stats);
