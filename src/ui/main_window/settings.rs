@@ -190,7 +190,7 @@ impl MainWindow {
             )
         });
 
-        skin(cx)
+        let reminders = skin(cx)
             .card(cx)
             .gap_4()
             .child(skin(cx).eyebrow(tr!("Break reminders"), cx))
@@ -213,8 +213,39 @@ impl MainWindow {
                 cx,
             ))
             .child(skin(cx).divider(cx))
-            .children(durations)
+            .children(durations);
+
+        v_flex()
+            .gap_5()
+            .child(reminders)
+            .child(self.render_evening_settings(cx))
             .into_any_element()
+    }
+
+    fn render_evening_settings(&self, cx: &mut Context<Self>) -> Div {
+        let evening = &self.controller.read(cx).config.evening;
+        let enable = self.controller.clone();
+        skin(cx)
+            .card(cx)
+            .gap_4()
+            .child(skin(cx).eyebrow(tr!("Evening cutoff"), cx))
+            .child(kit::toggle_row(
+                "evening-enabled",
+                tr!("Stop using the computer in the evening"),
+                tr!("From the time you set until 05:00, an overlay over every screen says the day is done. You can always carry on."),
+                evening.enabled,
+                move |on, cx| enable.update(cx, |c, cx| c.update_config(cx, |cfg| cfg.evening.enabled = on)),
+                cx,
+            ))
+            .child(kit::setting_row(
+                tr!("No computer after"),
+                Some(
+                    tr!("Sleep doctors suggest putting screens away 30 to 60 minutes before bed. Try an hour before you usually go to bed.")
+                        .into(),
+                ),
+                div().id("evening-cutoff").test_support().w(px(140.)).child(self.controls.cutoff().input()),
+                cx,
+            ))
     }
 
     fn render_advanced_settings(&self, cx: &mut Context<Self>) -> AnyElement {

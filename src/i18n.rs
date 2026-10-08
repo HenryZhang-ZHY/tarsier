@@ -368,6 +368,17 @@ static ZH: &[(&str, &str)] = &[
     ("1 day", "{n} 天"),
     ("{n} days", "{n} 天"),
     ("Points", "积分"),
+    ("Evening cutoff", "下机时间"),
+    ("Stop using the computer in the evening", "晚上到点下机"),
+    (
+        "From the time you set until 05:00, an overlay over every screen says the day is done. You can always carry on.",
+        "从你设定的时间到早上 5 点，所有屏幕上会出现一层遮罩，告诉你今天该结束了。想继续用，随时可以。",
+    ),
+    ("No computer after", "每天几点以后不用电脑"),
+    (
+        "Sleep doctors suggest putting screens away 30 to 60 minutes before bed. Try an hour before you usually go to bed.",
+        "睡眠专家建议睡前 30–60 分钟停用屏幕。可以从你平时上床的时间往前推一小时。",
+    ),
     ("Title", "称号"),
     ("Grade {g}", "评级 {g}"),
     ("out of 100", "满分 100"),

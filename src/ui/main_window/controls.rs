@@ -17,6 +17,7 @@ use crate::controller::Controller;
 use crate::display::mccs::{VCP_BRIGHTNESS, VCP_CONTRAST};
 use crate::platform;
 use crate::ui::number_field::{NumberField, Range};
+use crate::ui::time_field::TimeField;
 
 /// An editable break duration, shared by the Settings section and the summary
 /// on the Breaks tab.
@@ -80,6 +81,7 @@ struct FeatureControl {
 pub struct Controls {
     features: HashMap<FeatureKey, FeatureControl>,
     durations: HashMap<&'static str, NumberField>,
+    cutoff: TimeField,
     names: HashMap<String, (Entity<InputState>, Subscription)>,
 }
 
@@ -101,9 +103,20 @@ impl Controls {
                 (field.key, number)
             })
             .collect();
+        let cutoff = {
+            let initial = controller.read(cx).config.evening.cutoff;
+            let controller = controller.clone();
+            TimeField::new(
+                initial,
+                move |time, cx| controller.update(cx, |c, cx| c.update_config(cx, |cfg| cfg.evening.cutoff = time)),
+                window,
+                cx,
+            )
+        };
         Self {
             features: HashMap::new(),
             durations,
+            cutoff,
             names: HashMap::new(),
         }
     }
@@ -120,6 +133,10 @@ impl Controls {
         self.durations.get(key)
     }
 
+    pub fn cutoff(&self) -> &TimeField {
+        &self.cutoff
+    }
+
     pub fn name(&self, monitor: &str, port: u8) -> Option<&Entity<InputState>> {
         self.names.get(&endpoint_key(monitor, port)).map(|(state, _)| state)
     }
@@ -131,12 +148,16 @@ impl Controls {
         window: &mut Window,
         cx: &mut Context<MainWindow>,
     ) {
-        let breaks = controller.read(cx).config.breaks.clone();
+        let (breaks, cutoff) = {
+            let config = &controller.read(cx).config;
+            (config.breaks.clone(), config.evening.cutoff)
+        };
         for field in &BREAK_FIELDS {
             if let Some(number) = self.durations.get(field.key) {
                 number.sync((field.get)(&breaks), window, cx);
             }
         }
+        self.cutoff.sync(cutoff, window, cx);
         self.sync_features(controller, window, cx);
         self.sync_names(setup, controller, window, cx);
     }

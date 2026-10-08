@@ -426,3 +426,32 @@ fn an_empty_machine_says_what_to_do(cx: &mut TestAppContext) {
     ui.go(cx, Tab::Settings, Some(Section::Displays));
     ui.frame(cx, |window, _| assert!(window.try_find("export-switching").is_some()));
 }
+
+#[gpui_kit::test]
+fn setting_the_evening_cutoff(cx: &mut TestAppContext) {
+    let ui = open_with(cx, Skin::Native, Language::En, DEFAULT);
+    ui.go(cx, Tab::Settings, Some(Section::Breaks));
+    assert!(!ui.config(cx).evening.enabled, "off until asked for");
+    ui.frame(cx, |window, cx| {
+        click_into_view(window, "evening-enabled", cx);
+        click_into_view(window, "evening-cutoff", cx);
+        window.press("ctrl-a", cx);
+        window.input("2130", cx);
+        window.press("enter", cx);
+    });
+    let evening = ui.config(cx).evening;
+    assert!(evening.enabled);
+    assert_eq!(
+        evening.cutoff.to_string(),
+        "21:30",
+        "typed the short way, saved the long way"
+    );
+
+    // A morning is not an evening: the field goes back to what it was.
+    ui.frame(cx, |window, cx| {
+        window.press("ctrl-a", cx);
+        window.input("08:00", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(ui.config(cx).evening.cutoff.to_string(), "21:30");
+}

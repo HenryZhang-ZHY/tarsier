@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::breaks::BreakSettings;
 use crate::display::InputProtocolPref;
+use crate::evening::ClockTime;
 use crate::i18n::{Language, tr};
 use crate::skin::Skin;
 
@@ -18,6 +19,7 @@ use crate::skin::Skin;
 #[serde(default)]
 pub struct Config {
     pub breaks: BreakConfig,
+    pub evening: EveningConfig,
     pub hotkeys: Hotkeys,
     /// Brightness change per hotkey press, in percent of the monitor's range.
     pub brightness_step: u32,
@@ -114,6 +116,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             breaks: BreakConfig::default(),
+            evening: EveningConfig::default(),
             hotkeys: Hotkeys::default(),
             brightness_step: 10,
             monitors: BTreeMap::new(),
@@ -159,6 +162,45 @@ impl BreakConfig {
 }
 
 /// Global hotkeys in `global-hotkey` syntax, e.g. `ctrl+alt+I`; empty disables.
+/// The evening cutoff: no computer after this time of day.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EveningConfig {
+    pub enabled: bool,
+    /// A mistyped time falls back to the default rather than costing the user
+    /// every other setting in the file.
+    #[serde(deserialize_with = "lenient_cutoff")]
+    pub cutoff: ClockTime,
+}
+
+/// Where the cutoff starts when it is first turned on. Sleep doctors put no
+/// clock time on it, only "30 to 60 minutes before bed"; this is an hour
+/// before an 11 o'clock bedtime, and the user moves it to their own.
+pub const DEFAULT_CUTOFF: ClockTime = match ClockTime::new(22, 0) {
+    Some(time) => time,
+    None => unreachable!(),
+};
+
+impl Default for EveningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cutoff: DEFAULT_CUTOFF,
+        }
+    }
+}
+
+fn lenient_cutoff<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<ClockTime, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    match text.parse::<ClockTime>() {
+        Ok(time) if time.is_evening() => Ok(time),
+        _ => {
+            log::warn!("evening.cutoff {text:?} is not a time from 12:00 to 04:59; using {DEFAULT_CUTOFF}");
+            Ok(DEFAULT_CUTOFF)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hotkeys {
@@ -509,6 +551,19 @@ mod tests {
             "{ not json"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_mistyped_cutoff_costs_only_itself() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"evening":{"enabled":true,"cutoff":"9pm"},"brightness_step":5}"#).unwrap();
+        assert!(cfg.evening.enabled);
+        assert_eq!(cfg.evening.cutoff, DEFAULT_CUTOFF);
+        assert_eq!(cfg.brightness_step, 5, "the rest of the file still counts");
+        let morning: Config = serde_json::from_str(r#"{"evening":{"cutoff":"08:00"}}"#).unwrap();
+        assert_eq!(morning.evening.cutoff, DEFAULT_CUTOFF, "not an evening");
+        let fine: Config = serde_json::from_str(r#"{"evening":{"cutoff":"21:30"}}"#).unwrap();
+        assert_eq!(fine.evening.cutoff.to_string(), "21:30");
     }
 
     #[test]

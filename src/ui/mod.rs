@@ -3,6 +3,7 @@ mod kit;
 pub mod main_window;
 mod number_field;
 pub mod switch_hud;
+mod time_field;
 
 use std::borrow::Cow;
 
